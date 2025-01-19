@@ -1,6 +1,6 @@
 ﻿'''
-This program will be used to test the performance of each of the algorithms developed
-in the other files, such as 'CNN', 'ConvLSTM' and 'CNN-LSTM'.
+This program will be used to test the performance of the algorithms developed
+in the other files, such as 'CNN' and 'ConvLSTM'.
 
 It will define the loss function (categorical cross-entropy).
 
