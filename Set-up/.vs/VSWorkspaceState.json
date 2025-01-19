@@ -1,6 +1,9 @@
 {
   "ExpandedNodes": [
-    ""
+    "",
+    "\\Thesis",
+    "\\Thesis\\Thesis"
   ],
+  "SelectedNode": "\\Thesis\\Thesis\\thermal.py",
   "PreviewInSolutionExplorer": false
 }

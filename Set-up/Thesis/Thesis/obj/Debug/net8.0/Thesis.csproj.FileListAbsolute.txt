@@ -1,0 +1,5 @@
+C:\Users\txiki\OneDrive\Documents\Studies\MSc_Geomatics\2Y\Thesis\Code\Set-up\Thesis\Thesis\obj\Debug\net8.0\Thesis.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\txiki\OneDrive\Documents\Studies\MSc_Geomatics\2Y\Thesis\Code\Set-up\Thesis\Thesis\obj\Debug\net8.0\Thesis.AssemblyInfoInputs.cache
+C:\Users\txiki\OneDrive\Documents\Studies\MSc_Geomatics\2Y\Thesis\Code\Set-up\Thesis\Thesis\obj\Debug\net8.0\Thesis.AssemblyInfo.cs
+C:\Users\txiki\OneDrive\Documents\Studies\MSc_Geomatics\2Y\Thesis\Code\Set-up\Thesis\Thesis\obj\Debug\net8.0\Thesis.csproj.CoreCompileInputs.cache
+C:\Users\txiki\OneDrive\Documents\Studies\MSc_Geomatics\2Y\Thesis\Code\Set-up\Thesis\Thesis\obj\Debug\net8.0\Thesis.sourcelink.json
