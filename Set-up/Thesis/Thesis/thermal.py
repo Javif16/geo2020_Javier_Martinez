@@ -17,13 +17,11 @@ import rasterio
 import matplotlib.pyplot as plt
 
 
-# Function to normalize values to range [0, 1]
 def normalize(data, min_val, max_val):
     return (data - min_val) / (max_val - min_val)
 
 
 def process_tif(input_file, output_file):
-    # Determine if the file is emissivity or LST based on the filename
     if "LST" in input_file:
         file = "Land Surface Temperature"
     elif "EMISS" in input_file:
@@ -31,7 +29,6 @@ def process_tif(input_file, output_file):
     else:
         raise ValueError("File name must contain 'LST' or 'B10'.")
 
-    # Open the TIF file
     with rasterio.open(input_file) as src:
         data = src.read(1)
         profile = src.profile  # metadata
