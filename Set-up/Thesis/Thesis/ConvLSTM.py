@@ -354,15 +354,22 @@ def train_evaluate_model(X_train, y_train, w_train, X_val, y_val, w_val,
     class EpochPredictionCallback(tf.keras.callbacks.Callback):
         def __init__(self, X_test, y_test):
             super().__init__()
-            self.X_test = X_test
-            self.y_test = y_test
+            # first and last 3
+            first_3 = X_test[:3]
+            last_3 = X_test[-3:]
+            self.X_test = np.concatenate([first_3, last_3], axis=0)
+
+            first_3_labels = y_test[:3]
+            last_3_labels = y_test[-3:]
+            self.y_test = np.concatenate([first_3_labels, last_3_labels], axis=0)
+
             self.epoch_predictions = []
             self.epoch_metrics = []
 
         def on_epoch_end(self, epoch, logs=None):
             # Make predictions on test set
             predictions = self.model.predict(self.X_test, verbose=0)
-            self.epoch_predictions.append(predictions.copy())
+            self.epoch_predictions.append(predictions)
 
             # Calculate metrics for this epoch
             metrics = compute_metrics(self.y_test, predictions)
