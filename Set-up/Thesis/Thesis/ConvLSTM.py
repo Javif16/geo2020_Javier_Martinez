@@ -33,6 +33,20 @@ import optuna
 from optuna.trial import TrialState
 import pickle
 from math import ceil
+from collections import defaultdict
+
+
+# Set memory growth to avoid memory allocation issues
+gpus = tf.config.experimental.list_physical_devices('GPU')
+if gpus:
+    try:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+    except RuntimeError as e:
+        print(f"GPU memory growth error: {e}")
+
+# Set mixed precision for memory efficiency
+tf.keras.mixed_precision.set_global_policy('mixed_float16')
 
 
 # -------------- LOADING DATA ------------------------------------------------------------------------------------------
@@ -125,7 +139,7 @@ def clstm_unet_model(size_input=(5, 64, 64, 1), filters=32, classes=14):
     # better for single map output - no need for sequence-for-sequence predictions
 
     # final layer
-    conv11 = Conv3D(classes, (1, 1, 1), padding='same', activation='softmax')(conv10)
+    conv11 = Conv3D(classes, (1, 1, 1), padding='same', activation='softmax', dtype='float32')(conv10)
 
     model = tf.keras.Model(inputs=inputs, outputs=conv11)
     model.summary()
@@ -146,7 +160,7 @@ TimeDistributed CNN:
 
 
 # -------------- TRAINING ----------------------------------------------------------------------------------------------
-def loss_function(w_train, weight_strength=1.0):
+def loss_function(w_train, weight_strength=1.5):
     def loss(y_true, y_pred):
         batch_size = tf.shape(y_true)[0]
         # Handle batch size properly - use modulo to cycle through weights if needed
@@ -155,23 +169,10 @@ def loss_function(w_train, weight_strength=1.0):
 
         # Reshape tensors for proper calculation
         num_classes = tf.shape(y_true)[4]
-        tf.print("batch_size:", batch_size)
-        tf.print("w_batch shape:", tf.shape(w_batch))
         # Flatten tensors for element-wise operations
         y_true_flat = tf.reshape(y_true, [-1, num_classes])
         y_pred_flat = tf.reshape(y_pred, [-1, num_classes])
-
-        # For ConvLSTM: (batch, 5, 64, 64, 14)
-        # Each sample contributes: 5 * 64 * 64 = 20480 elements
-        time_steps = tf.shape(y_true)[1]  # 5
-        height = tf.shape(y_true)[2]  # 64
-        width = tf.shape(y_true)[3]  # 64
-        elements_per_sample = time_steps * height * width
-
-        w_batch_squeezed = tf.squeeze(w_batch, axis=-1)  # Remove last dim: [32, 5, 64, 64]
-        w_flat = tf.reshape(w_batch_squeezed, [-1])  # Flatten: [655360]
-
-        tf.print("w_flat shape:", tf.shape(w_flat))
+        w_flat = tf.reshape(w_batch, [-1])
 
         # Use epsilon for numerical stability
         epsilon = tf.keras.backend.epsilon()
@@ -181,37 +182,32 @@ def loss_function(w_train, weight_strength=1.0):
 
         tf.print(y_true_flat[0])
         tf.print(y_pred_flat[0])
+        # ----------------------------------------------------------------
 
         # ====== INVERSE CLASS FREQUENCY WEIGHTING ======
-        # Calculate class frequencies in the current batch
-        class_counts = tf.reduce_sum(y_true_flat, axis=0)  # Sum over all pixels
-        class_counts = class_counts + epsilon  # Add epsilon to avoid division by zero
-
-        # Calculate total samples
+        class_counts = tf.reduce_sum(y_true_flat, axis=0)
+        class_counts = class_counts + epsilon  # epsilon to avoid division by 0
+        # Total samples and class frequencies
         total_samples = tf.reduce_sum(class_counts)
-
-        # Calculate class frequencies
         class_frequencies = class_counts / total_samples
 
-        # Use inverse weighting (stronger than square root)
+        # inverse weighting (stronger than square root)
         class_weights = 1.0 / (class_frequencies + 0.01)  # Small constant to prevent extreme weights
 
-        # Apply weight strength parameter to control how aggressive the weighting is
+        # control how aggressive the weighting is (1.0, 0.5, 1.5)
         class_weights = tf.pow(class_weights, weight_strength)
 
-        # Clip weights to prevent extreme values that could destabilize training
+        # clip weights to prevent extreme values + normalization (consistent loss scale)
         class_weights = tf.clip_by_value(class_weights, 0.1, 10.0)
-
-        # Normalize weights so they average to 1.0
         class_weights = class_weights / tf.reduce_mean(class_weights)
 
-        # Apply weighted cross-entropy
+        # weighted cross-entropy
         weighted_cce_per_pixel = -tf.reduce_sum(class_weights * y_true_flat * tf.math.log(y_pred_flat), axis=-1)
-        # Apply the original sample weights
-        final_weighted_loss = weighted_cce_per_pixel * w_flat
+        final_weighted_loss = weighted_cce_per_pixel * w_flat  # original sample weights
 
         # Return mean
         return tf.reduce_mean(final_weighted_loss)
+
     return loss
 
 
@@ -431,13 +427,13 @@ def train_evaluate_model(X_train, y_train, w_train, X_val, y_val, w_val,
 def compute_metrics(y_true, y_pred):
 
     # Convert predictions to class indices if they're probabilities
-    if y_pred.ndim == 4 and y_pred.shape[-1] > 1:  # Multi-class probabilities
+    if y_pred.ndim == 5 and y_pred.shape[-1] > 1:  # Multi-class probabilities
         y_pred_classes = np.argmax(y_pred, axis=-1)
     else:
         y_pred_classes = y_pred
 
     # Convert true labels to class indices if they're one-hot encoded
-    if y_true.ndim == 4 and y_true.shape[-1] > 1:  # One-hot encoded
+    if y_true.ndim == 5 and y_true.shape[-1] > 1:  # One-hot encoded
         y_true_classes = np.argmax(y_true, axis=-1)
     else:
         y_true_classes = y_true
@@ -572,7 +568,6 @@ def visualize_predictions(X_test, y_test, epoch_predictions, epoch_metrics,
         num_images: Number of full images to reconstruct and display
         timestep_to_visualize: Which timestep to use for reconstruction (-1 for last, 0 for first, etc.)
     """
-    from collections import defaultdict
 
     print("=== VISUALIZING ConvLSTM EPOCH-BY-EPOCH PREDICTIONS ===")
 
@@ -799,8 +794,6 @@ def visualize_temporal_evolution(X_test, y_test, predictions, positions, dates,
         dates: Date data (N_sequences, seq_length)
         sequence_idx: Which sequence to visualize
     """
-    import numpy as np
-    import matplotlib.pyplot as plt
 
     print(f"=== VISUALIZING TEMPORAL EVOLUTION FOR SEQUENCE {sequence_idx} ===")
 

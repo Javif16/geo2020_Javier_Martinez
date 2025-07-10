@@ -27,8 +27,8 @@ from sklearn.model_selection import train_test_split
 
 
 # ---------- FILES & DATASETS ------------------------------------------------------------------------------------------
-folder_path = "C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Images/Geology/Santa Olalla del Cala"
-file_path = "C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Images/Geology/Santa Olalla del Cala/ECOSTRESS_L2_LSTE_25405_006_20221229T022351_0601_01.h5"
+folder_path = "C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Images/Geology/Villoslada de Cameros"
+file_path = "C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Images/Geology/Villoslada de Cameros/ECOSTRESS_L2_LSTE_25405_006_20221229T022351_0601_01.h5"
 datasets = ['SDS/LST', 'SDS/Emis1', 'SDS/Emis2', 'SDS/Emis3', 'SDS/Emis4', 'SDS/Emis5', 'SDS/QC']
 
 '''
@@ -44,10 +44,10 @@ with h5py.File(file_path, 'r') as f:
     print(f"📖 Exploring HDF5 File: {file_path}")
     f.visititems(explore_h5_group)
 '''
-geo_map_path = "C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Images/Geology/Santa Olalla del Cala/Geo_map.tif"
+geo_map_path = "C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Images/Geology/Villoslada de Cameros/Geo_map_vill.tif"
 
 with rasterio.open(geo_map_path) as src:
-    class_band = src.read(1)  # Read the class labels band
+    class_band = src.read(2)  # Read the class labels band
     unique_values = np.unique(class_band)
     print("Unique class values:", unique_values)
     print("Number of unique classes:", len(unique_values))
@@ -173,8 +173,8 @@ def extract_weights(qc_data):
 
 # ---------- AOI -------------------------------------------------------------------------------------------------------
 # area of interest (same area for all images)
-SW_lat, SW_lon = 37.832876641, -6.520675667
-NE_lat, NE_lon = 37.999978411, -6.188309907
+SW_lat, SW_lon = 42.002377, -2.852681
+NE_lat, NE_lon = 42.168736, -2.518803
 
 
 def get_aoi(data, transform, sw_lat, sw_lon, ne_lat, ne_lon, north, south, east, west):
@@ -298,9 +298,9 @@ def normalize(data):
 
 
 # -------------- PATCHING ----------------------------------------------------------------------------------------------
-def patching(images, patch_size=64, stride=64, label=None):     # stride=128 means 50% overlapping
+def patching(images, patch_size=64, stride=48, label=None):     # stride=128 means 50% overlapping
     """
-    Extracts non-overlapping patches from the h5 images.
+    Extracts overlapping patches from the h5 images.
     :param image: 2D NumPy array (grayscale) or 3D NumPy array (multi-channel)
     :param patch_size: Size of patches
     :param stride: same as patch size to ensure no overlapping
@@ -329,7 +329,10 @@ def patching(images, patch_size=64, stride=64, label=None):     # stride=128 mea
 
 
 # -------------- PRE-PROCESSING ----------------------------------------------------------------------------------------
-def upscale_thermal_image(image_path, target_shape=(744, 1171)):
+# CROPPING to same SHAPE
+
+# UPSCALING
+def upscale_thermal_image(image_path, target_shape=(742, 1176)):
     """Upscale a thermal image to match the geological map size."""
     with rasterio.open(image_path) as src:
         image = src.read(1).astype(np.float32)
@@ -338,7 +341,7 @@ def upscale_thermal_image(image_path, target_shape=(744, 1171)):
     return upscaled_image  # Shape: (744, 1171)
 
 
-def upscale_weight_map(weight_path, target_shape=(744, 1171)):
+def upscale_weight_map(weight_path, target_shape=(742, 1176)):
     """Upscale a weight map (.npy) to match the geological map size."""
     weights = np.load(weight_path).astype(np.float32)  # Load .npy file
 
@@ -346,6 +349,53 @@ def upscale_weight_map(weight_path, target_shape=(744, 1171)):
     return upscaled_weights  # Shape: (744, 1171)
 
 
+'''
+# DOWNSAMPLING
+from scipy.stats import mode
+
+
+def downsample_majority_vote(label_image, target_shape):
+    H, W = label_image.shape
+    target_H, target_W = target_shape
+
+    scale_H = H // target_H
+    scale_W = W // target_W
+
+    downsampled = np.zeros((target_H, target_W), dtype=np.uint8)
+
+    for i in range(target_H):
+        for j in range(target_W):
+            block = label_image[
+                i * scale_H : (i + 1) * scale_H,
+                j * scale_W : (j + 1) * scale_W
+            ]
+            downsampled[i, j] = mode(block, axis=None, keepdims=False).mode
+
+    return downsampled
+
+
+def downsample_weights(weight_map, target_shape):
+    H, W = weight_map.shape
+    target_H, target_W = target_shape
+
+    scale_H = H // target_H
+    scale_W = W // target_W
+
+    downsampled = np.zeros((target_H, target_W), dtype=np.float32)
+
+    for i in range(target_H):
+        for j in range(target_W):
+            block = weight_map[
+                i * scale_H : (i + 1) * scale_H,
+                j * scale_W : (j + 1) * scale_W
+            ]
+            downsampled[i, j] = np.mean(block)
+
+    return downsampled
+'''
+
+
+# NaNs
 def check_and_fix_nans(data_array, replace_value=0.0):
     """Check for NaN values in the array and replace them with the specified value."""
     nan_count = np.isnan(data_array).sum()
@@ -358,7 +408,7 @@ def check_and_fix_nans(data_array, replace_value=0.0):
 def geo_tiffs_preprocess(folder_path, num_classes=14):
     tiff_files = glob.glob(os.path.join(folder_path, "*.tif"))
     weight_files = glob.glob(os.path.join(folder_path, "*_weights.npy"))
-    geo_map_path = "C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Images/Geology/Santa Olalla del Cala/Geo_map.tif"
+    geo_map_path = "C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Images/Geology/Villoslada de Cameros/Geo_map_Vill.tif"
 
     print(f"Found {len(tiff_files)} TIFF files and {len(weight_files)} weight files in {folder_path}.")
     if len(tiff_files) == 0:
@@ -372,32 +422,34 @@ def geo_tiffs_preprocess(folder_path, num_classes=14):
             for dataset in ["SDS_LST", "SDS_Emis1", "SDS_Emis2", "SDS_Emis3", "SDS_Emis4", "SDS_Emis5", "SDS_QC"]:
                 if file.endswith(f"{dataset}.tif"):
                     date_key = file.split("_")[5][:8]  # Extract YYYYMMDD from filename
+                    time_key = file.split("_")[5][9:]
                     if date_key not in grouped_files:
                         grouped_files[date_key] = {}
                     grouped_files[date_key][dataset] = os.path.join(folder_path, file)
+                    grouped_files[date_key]['time'] = time_key
         elif file.endswith("weights.npy"):
             date_key = file.split("_")[5][:8]  # Extract YYYYMMDD from filename
             weight_files_dict[date_key] = os.path.join(folder_path, file)
 
-    all_thermal_patches = []
-    all_label_patches = []
-    all_weight_patches = []
-    all_positions = []
+    all_thermals = []
+    all_labels = []
+    all_weights = []
     all_date_indices = []  # NEW: Track which date each patch comes from
 
     # Open the geology map once here
     with rasterio.open(geo_map_path) as src:
-        class_band = src.read(1)  # Class labels (e.g., 0, 1, 2, 3, etc.)
-        weight_band = src.read(2)  # Class weights
+        print(src.read(2)[:10])
+        class_band = src.read(2)  # Class labels (e.g., 0, 1, 2, 3, etc.)
+        weight_band = src.read(1)  # Class weights
 
-        # Extract patches from geology map (class labels)
-        geo_class_patches, class_positions = patching(class_band)  # (num_patches, patch_size, patch_size)
-        geo_weight_patches, weights_positions = patching(weight_band)  # (num_patches, patch_size, patch_size)
-        assert class_positions == weights_positions, "Label missmatch"
+        geo_class_image = class_band  # shape (H, W)
+        print(geo_class_image.shape)
+        geo_weight_image = weight_band  # shape (H, W)
 
     for date_idx, date_key in enumerate(sorted(grouped_files.keys())):
-        dataset_files = grouped_files[date_key]
         print(date_idx)
+        dataset_files = grouped_files[date_key]
+        time_key = dataset_files.get("time", 'UNKOWN')
         required_datasets = ["SDS_LST", "SDS_Emis1", "SDS_Emis2", "SDS_Emis3", "SDS_Emis4", "SDS_Emis5"]
 
         # Check if all required datasets are present in the grouped dataset files
@@ -411,151 +463,103 @@ def geo_tiffs_preprocess(folder_path, num_classes=14):
             continue
 
         # If both datasets and weight files exist for the date_key, proceed with processing
-        print(f"Processing data for {date_key}...")
+        formatted_date = f"{date_key[6:8]}/{date_key[4:6]}/{date_key[0:4]}"  # DD/MM/YYYY
+        formatted_time = f"{time_key[0:2]}:{time_key[2:4]}:{time_key[4:6]}"  # HH:MM:SS
+        print(f"Processing data: {formatted_date} - {formatted_time}")
 
         stacked_images = []
         for ds in required_datasets:
+            # with rasterio.open(dataset_files[ds]) as src:  # this line and the next ones go out if upscaling
+              #  image = src.read(1).astype(np.float32)
+               # normalized_image = normalize(image)
+                #stacked_images.append(normalized_image)
             upscaled_image = upscale_thermal_image(dataset_files[ds])  # Upscale .tif file
             normalized_image = normalize(upscaled_image)  # Normalize
             stacked_images.append(normalized_image)
 
         stacked_images = np.stack(stacked_images, axis=-1)  # (744, 1171, 6)
+
+        # thermal_shape = stacked_images.shape[:2]
+        # down_labels = downsample_majority_vote(geo_class_image, thermal_shape)
+        # down_weights = downsample_weights(geo_weight_image, thermal_shape)
         upscaled_weights = upscale_weight_map(weight_files_dict[date_key])  # Upscale .npy weights
-
-        # Extract patches
-        thermal_patches, thermal_positions = patching(stacked_images)  # (num_patches, patch_size, patch_size, 6)
-        thermal_weight_patches, weight_thermal_positions = patching(upscaled_weights)  # (num_patches, patch_size, patch_size)
-        assert thermal_positions == class_positions, "Thermal missmatch"
-
-        # Ensure the number of patches is consistent between the geology map and thermal images
-        if thermal_patches.shape[0] != geo_class_patches.shape[0] or thermal_patches.shape[0] != \
-                geo_weight_patches.shape[0]:
-            print(f"⚠️ Mismatch in number of patches for {date_key}, skipping...")
+        if stacked_images.shape[:2] != geo_class_image.shape:
+        # if stacked_images.shape[:2] != down_labels.shape:
+            print(f"⚠️ Image shape mismatch for {date_key}, skipping...")
             continue
 
-        # Combine the thermal image weights and geology class weights by multiplying them
-        for i in range(thermal_patches.shape[0]):
-            all_thermal_patches.append(thermal_patches[i])
-            all_label_patches.append(geo_class_patches[i])  # Same for all dates
-            combined_weights = thermal_weight_patches[i] * geo_weight_patches[i]
-            all_weight_patches.append(combined_weights)
-            all_date_indices.append(date_idx)  # NEW: Track date index
+        combined_weights = upscaled_weights * geo_weight_image  # shape (H, W)
+        # combined_weights = down_weights
 
-            # patch positions
-            if len(all_positions) < len(all_thermal_patches):
-                all_positions.append(class_positions[i])
+        all_thermals.append(stacked_images)  # shape (H, W, 6)
+        all_labels.append(geo_class_image)  # shape (H, W)
+        all_weights.append(combined_weights)  # shape (H, W)
+        all_date_indices.append(date_idx)
 
     # Combine all patches into single arrays
-    all_thermal_patches = np.array(all_thermal_patches)
-    all_label_patches = np.array(all_label_patches)
-    all_weight_patches = np.array(all_weight_patches)
-    all_positions = np.array(all_positions)
-    all_date_indices = np.array(all_date_indices)  # NEWwx
+    all_thermals = np.array(all_thermals)
+    all_labels = np.array(all_labels)
+    all_weights = np.array(all_weights)
+    all_date_indices = np.array(all_date_indices)
 
     print(
-        f"Final arrays shape: thermal={all_thermal_patches.shape}, labels={all_label_patches.shape}, weights={all_weight_patches.shape}, positions={all_positions.shape}, dates={all_date_indices.shape}")
+        f"Final arrays shape: thermal={all_thermals.shape}, labels={all_labels.shape}, weights={all_weights.shape}, dates={all_date_indices.shape}")
 
     # Fix NaN values
-    all_thermal_patches = check_and_fix_nans(all_thermal_patches)
-    all_label_patches = check_and_fix_nans(all_label_patches)
-    all_weight_patches = check_and_fix_nans(all_weight_patches)
+    all_thermal_images = check_and_fix_nans(all_thermals)
+    all_label_images = check_and_fix_nans(all_labels)
+    all_weight_images = check_and_fix_nans(all_weights)
 
-    # Convert labels to one-hot encoding
-    one_hot_labels = []
-    for patch in all_label_patches:
-        patch_2d = np.squeeze(patch)
-        # Convert each patch to one-hot encoding
-        one_hot_patch = np.zeros((patch_2d.shape[0], patch_2d.shape[1], num_classes), dtype=np.float32)
-
-        # Loop through each possible class
-        for class_idx in range(num_classes):
-            # Create a boolean mask where patch == class_idx
-            mask = (patch_2d == class_idx)
-            # Set those positions to 1 in the appropriate channel
-            one_hot_patch[mask, class_idx] = 1.0
-
-        one_hot_labels.append(one_hot_patch)
-
-    one_hot_labels = np.array(one_hot_labels)
-
-    print(f"One-hot labels shape: {one_hot_labels.shape}")
-
-    return all_thermal_patches, one_hot_labels, all_weight_patches, all_positions, all_date_indices
-
-
-# -------------- SPLITS ------------------------------------------------------------------------------------------------
-
-def splitting(patches, labels, weights, positions, date_indices):
-    if patches.ndim == 5:  # ConvLSTM case: (N_seq, seq_length, H, W, C)
-        sequence_start_dates = date_indices[:, 0]  # shape: (N_seq,) - use first date of each sequence
-        # unique dates based on start time
-        unique_dates = np.unique(sequence_start_dates)
-        n_dates = len(unique_dates)
-
-        # split dates
-        train_dates = unique_dates[:int(n_dates * 0.7)]
-        val_dates = unique_dates[int(n_dates * 0.7):int(n_dates * 0.9)]
-        test_dates = unique_dates[int(n_dates * 0.9):]
-
-        # Create masks based on sequence start dates
-        train_mask = np.isin(sequence_start_dates, train_dates)
-        val_mask = np.isin(sequence_start_dates, val_dates)
-        test_mask = np.isin(sequence_start_dates, test_dates)
-
-    else:  # CNN case: (N, H, W, C)
-        unique_dates = np.unique(date_indices)
-        n_dates = len(unique_dates)
-
-        # split dates
-        train_dates = unique_dates[:int(n_dates * 0.7)]
-        val_dates = unique_dates[int(n_dates * 0.7):int(n_dates * 0.9)]
-        test_dates = unique_dates[int(n_dates * 0.9):]
-
-        # Create masks
-        train_mask = np.isin(date_indices, train_dates)
-        val_mask = np.isin(date_indices, val_dates)
-        test_mask = np.isin(date_indices, test_dates)
-
-    return (patches[train_mask], patches[val_mask], patches[test_mask],
-            labels[train_mask], labels[val_mask], labels[test_mask],
-            weights[train_mask], weights[val_mask], weights[test_mask],
-            positions[train_mask], positions[val_mask], positions[test_mask],
-            date_indices[train_mask], date_indices[val_mask], date_indices[test_mask])
+    return all_thermal_images, all_label_images, all_weight_images, all_date_indices
 
 
 # -------------- WORKFLOW ----------------------------------------------------------------------------------------------
-output_path = "C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Images/Examples/Santa_Olalla_tif"
+output_path = "C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Images/Examples/Villoslada_tif"
 
 os.makedirs(output_path, exist_ok=True)
 # for h5_file in glob.glob(os.path.join(folder_path, "*.h5")):
-    # tiff_aoi(h5_file, output_path, datasets, SW_lat, SW_lon, NE_lat, NE_lon)
+   # tiff_aoi(h5_file, output_path, datasets, SW_lat, SW_lon, NE_lat, NE_lon)
 
-tiff_patches, labels, weight_maps, patch_positions, date_indices = geo_tiffs_preprocess(output_path, num_classes=14)
-print(f"Number of patches extracted: {len(tiff_patches)}")
-print(f"Number of positions extracted: {len(patch_positions)}")
+tiff_thermal, labels, weight_maps, date_indices = geo_tiffs_preprocess(output_path, num_classes=14)
+print(f"Number of thermal images extracted: {len(tiff_thermal)}")
 print(f"Number of dates: {len(np.unique(date_indices))}")
-if len(tiff_patches) == 0:
-    raise ValueError("No patches were extracted. Check the TIFF processing pipeline!")
+if len(tiff_thermal) == 0:
+    raise ValueError("No thermal images were extracted. Check the TIFF processing pipeline!")
 
-'''
-# CNN
-cnn_patches = tiff_patches.astype(np.float32)
+# -------------- CNN ----------------------------------------------------------------------------------------------
+cnn_patches = tiff_thermal.astype(np.float32)
 cnn_labels = labels.astype(np.float32)
 cnn_weights = weight_maps.astype(np.float32)
-cnn_positions = patch_positions
 cnn_dates = date_indices
 
-print("Shapes before splitting:")
-print("cnn_patches:", cnn_patches.shape)
-print("cnn_labels:", cnn_labels.shape)
-print("cnn_weights:", cnn_weights.shape)
-print("cnn_positions:", cnn_positions.shape)
-print("cnn_dates:", cnn_dates.shape)
+# First split: train (70%) and temp (30%)
+X_train, X_temp, y_train, y_temp, w_train, w_temp, date_train, date_temp = train_test_split(
+    cnn_patches, cnn_labels, cnn_weights, cnn_dates, test_size=0.3, random_state=42, shuffle=True
+)
 
-(X_train, X_val, X_test, y_train, y_val, y_test,
- w_train, w_val, w_test, pos_train, pos_val, pos_test,
- date_train, date_val, date_test) = splitting(
-    cnn_patches, cnn_labels, cnn_weights, cnn_positions, cnn_dates)
+# Second split: temp -> val (15%) and test (15%)
+X_val, X_test, y_val, y_test, w_val, w_test, date_val, date_test = train_test_split(
+    X_temp, y_temp, w_temp, date_temp, test_size=0.5, random_state=42, shuffle=True
+)
+
+# y_train = y_train.reshape(-1)
+# y_val = y_val.reshape(-1)
+# y_test = y_test.reshape(-1)
+
+print("Final thermal train cnn shape:", X_train.shape)
+print("Final labels train cnn shape:", y_train.shape)
+print("Final weights train cnn shape:", w_train.shape)
+print("Final dates train cnn shape:", date_train.shape)
+
+print("Final thermal val cnn shape:", X_val.shape)
+print("Final labels val cnn shape:", y_val.shape)
+print("Final weights val cnn shape:", w_val.shape)
+print("Final dates val cnn shape:", date_val.shape)
+
+print("Final thermal test cnn shape:", X_test.shape)
+print("Final labels test cnn shape:", y_test.shape)
+print("Final weights test cnn shape:", w_test.shape)
+print("Final dates test cnn shape:", date_test.shape)
 
 # Save all data including positions
 np.save("X_train.npy", X_train)
@@ -567,139 +571,86 @@ np.save("y_test.npy", y_test)
 np.save("weights_train.npy", w_train)
 np.save("weights_val.npy", w_val)
 np.save("weights_test.npy", w_test)
-np.save("positions_train.npy", pos_train)
-np.save("positions_val.npy", pos_val)
-np.save("positions_test.npy", pos_test)
 np.save("date_indices_train.npy", date_train)
 np.save("date_indices_val.npy", date_val)
 np.save("date_indices_test.npy", date_test)
-
 print("✅ Processing complete! Data saved for CNN training.")
-'''
 
 
-# ConvLSTM
-def generate_temporal_sequences(data, labels, weights, positions, dates, seq_length=5, step=3, max_sequences=None):
-    # step=2 gives memory error, this is max
+# -------------- ConvLSTM ----------------------------------------------------------------------------------------------
+def generate_temporal_sequences(data, labels, weights, dates, seq_length=5, step=3, max_sequences=None):
     """
-        Generate temporal sequences by grouping patches from the SAME spatial position across different dates.
+    Generate temporal sequences from full images (not patches).
 
-        Args:
-            thermal_data: (22572, 64, 64, 6) - All patches
-            labels: (22572, 64, 64, 14) - All patch labels
-            weights: (22572, 64, 64, 1) - All patch weights
-            positions: (22572, 2) - Spatial positions of patches
-            date_indices: (22572,) - Date index for each patch
-            seq_length: Length of temporal sequences
-            step: Step between sequence start dates
-            max_sequences: Maximum number of sequences to generate
+    Args:
+        data: (N, H, W, C) - Full thermal images
+        labels: (N, H, W) - Ground truth labels per image
+        weights: (N, H, W) - Weight maps per image
+        dates: (N,) - Dates corresponding to each full image
+        seq_length: Number of time steps in each sequence
+        step: Temporal stride between sequences
+        max_sequences: Max number of sequences to generate (optional)
 
-        Returns:
-            Temporal sequences where each sequence contains the same spatial patch across different dates
-        """
-
-    print("Organizing patches by spatial position and date...")
-
-    # Group patches by spatial position
-    position_groups = defaultdict(list)
-
-    for i in range(len(data)):
-        # Use position as key (convert to tuple for hashing)
-        pos_key = tuple(positions[i])
-        position_groups[pos_key].append({
-            'index': i,
-            'date': dates[i],
-            'thermal': data[i],
-            'label': labels[i],
-            'weight': weights[i],
-            'position': positions[i]
-        })
-
-    print(f"Found {len(position_groups)} unique spatial positions")
-
-    # Sort each position group by date
-    for pos_key in position_groups:
-        position_groups[pos_key].sort(key=lambda x: x['date'])
-
-    # Generate temporal sequences
+    Returns:
+        Tuple of sequences:
+        - thermal_sequences: (N_seq, seq_length, H, W, C)
+        - label_sequences: (N_seq, seq_length, H, W)
+        - weight_sequences: (N_seq, seq_length, H, W)
+        - date_sequences: (N_seq, seq_length)
+    """
     thermal_sequences = []
     label_sequences = []
     weight_sequences = []
-    position_sequences = []
     date_sequences = []
 
-    sequence_count = 0
-
-    for pos_key, patches_at_position in position_groups.items():
-        # Check if we have enough dates for this position
-        if len(patches_at_position) < seq_length:
-            continue
-
-        # Generate sequences for this spatial position
-        for start_idx in range(0, len(patches_at_position) - seq_length + 1, step):
-            if max_sequences is not None and sequence_count >= max_sequences:
-                break
-
-            # Extract sequence of patches from the same position across different dates
-            sequence_patches = patches_at_position[start_idx:start_idx + seq_length]
-
-            # Build sequences
-            thermal_seq = np.array([p['thermal'] for p in sequence_patches])
-            label_seq = np.array([p['label'] for p in sequence_patches])
-            weight_seq = np.array([p['weight'] for p in sequence_patches])
-            position_seq = np.array([p['position'] for p in sequence_patches])
-            date_seq = np.array([p['date'] for p in sequence_patches])
-
-            thermal_sequences.append(thermal_seq)
-            label_sequences.append(label_seq)
-            weight_sequences.append(weight_seq)
-            position_sequences.append(position_seq)
-            date_sequences.append(date_seq)
-
-            sequence_count += 1
-
-            if sequence_count % 100 == 0:
-                print(f"Generated {sequence_count} temporal sequences...")
-
-        if max_sequences is not None and sequence_count >= max_sequences:
+    total_sequences = len(data) - seq_length + 1
+    for i in range(0, total_sequences, step):
+        if max_sequences is not None and len(thermal_sequences) >= max_sequences:
             break
 
-    print(f"Generated {sequence_count} temporal sequences from {len(position_groups)} spatial positions")
+        thermal_seq = data[i:i + seq_length]
+        label_seq = labels[i:i + seq_length]
+        weight_seq = weights[i:i + seq_length]
+        date_seq = dates[i:i + seq_length]
+
+        thermal_sequences.append(thermal_seq)
+        label_sequences.append(label_seq)
+        weight_sequences.append(weight_seq)
+        date_sequences.append(date_seq)
 
     return (np.array(thermal_sequences), np.array(label_sequences),
-            np.array(weight_sequences), np.array(position_sequences),
-            np.array(date_sequences))
+            np.array(weight_sequences), np.array(date_sequences))
 
 
-# Print shapes and collect sequences if needed
 print("Creating ConvLSTM temporal sequences...")
-
-max_sequences = 5867
 seq_length = 5
-step = 4
-clstm_patches, clstm_labels, clstm_weights, clstm_positions, clstm_dates = generate_temporal_sequences(
-    tiff_patches, labels, weight_maps, patch_positions, date_indices,
-    seq_length=seq_length, step=step, max_sequences=max_sequences
+step = 2
+clstm_patches, clstm_labels, clstm_weights, clstm_dates = generate_temporal_sequences(
+    tiff_thermal, labels, weight_maps, date_indices,
+    seq_length=seq_length, step=step
 )
-print("ConvLSTM shapes after sequence generation:")
-print("clstm_patches:", clstm_patches.shape)      # (num_sequences, seq_length, H, W, C)
-print("clstm_labels:", clstm_labels.shape)        # (num_sequences, seq_length, H, W, num_classes)
-print("clstm_weights:", clstm_weights.shape)      # (num_sequences, seq_length, H, W)
-print("clstm_positions:", clstm_positions.shape)  # (num_sequences, seq_length, 2) - keeps all positions in the sequence, not only the first one
-print("clstm_dates:", clstm_dates.shape)          # (num_sequences, seq_length)
 
-(X_train_lstm, X_val_lstm, X_test_lstm,
- y_train_lstm, y_val_lstm, y_test_lstm,
- w_train_lstm, w_val_lstm, w_test_lstm,
- pos_train_lstm, pos_val_lstm, pos_test_lstm,
- date_train_lstm, date_val_lstm, date_test_lstm) = splitting(
-    clstm_patches, clstm_labels, clstm_weights, clstm_positions, clstm_dates)
+print("clstm_patches:", clstm_patches.shape)  # (N_seq, seq_length, H, W, C)
+print("clstm_labels:", clstm_labels.shape)    # (N_seq, seq_length, H, W)
+print("clstm_weights:", clstm_weights.shape)  # (N_seq, seq_length, H, W)
+print("clstm_dates:", clstm_dates.shape)      # (N_seq, seq_length)
 
+X_train_lstm, X_temp_lstm, y_train_lstm, y_temp_lstm, w_train_lstm, w_temp_lstm, date_train_lstm, date_temp_lstm = train_test_split(
+    clstm_patches, clstm_labels, clstm_weights, clstm_dates, test_size=0.3, random_state=42, shuffle=False
+)
+
+X_val_lstm, X_test_lstm, y_val_lstm, y_test_lstm, w_val_lstm, w_test_lstm, date_val_lstm, date_test_lstm = train_test_split(
+    X_temp_lstm, y_temp_lstm, w_temp_lstm, date_temp_lstm, test_size=0.5, random_state=42, shuffle=False
+)
+
+# y_train_lstm = y_train_lstm.reshape(-1)
+# y_val_lstm = y_val_lstm.reshape(-1)
+# y_test_lstm = y_test_lstm.reshape(-1)
 print("Final thermal train lstm shape:", X_train_lstm.shape)
 print("Final labels train lstm shape:", y_train_lstm.shape)
 print("Final weights train lstm shape:", w_train_lstm.shape)
-print("Final positions train lstm shape:", pos_train_lstm.shape)
 print("Final dates train lstm shape:", date_train_lstm.shape)
+
 # ConvLSTM - Save all data including positions
 np.save("X_train_lstm.npy", X_train_lstm)
 np.save("X_val_lstm.npy", X_val_lstm)
@@ -710,9 +661,6 @@ np.save("y_test_lstm.npy", y_test_lstm)
 np.save("weights_train_lstm.npy", w_train_lstm)
 np.save("weights_val_lstm.npy", w_val_lstm)
 np.save("weights_test_lstm.npy", w_test_lstm)
-np.save("positions_train_lstm.npy", pos_train_lstm)
-np.save("positions_val_lstm.npy", pos_val_lstm)
-np.save("positions_test_lstm.npy", pos_test_lstm)
 np.save("dates_train_lstm.npy", date_train_lstm)
 np.save("dates_val_lstm.npy", date_val_lstm)
 np.save("dates_test_lstm.npy", date_test_lstm)
