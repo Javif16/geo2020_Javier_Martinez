@@ -31,7 +31,8 @@ import os
 import json
 from pathlib import Path
 import matplotlib.pyplot as plt
-import cv2
+from matplotlib.colors import ListedColormap
+import random
 import rasterio
 import tensorflow as tf
 from tensorflow.keras import backend
@@ -113,29 +114,24 @@ print(f"Label range: {np.min(y_train)} to {np.max(y_train)}")
 '''
 
 # -------------- LOADING -----------------------------------------------------------------------------------------------
-output_dir = Path("C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Outputs/Villoslada")
-patches_path = output_dir / 'cnn_patches' / 'thermal' / 'all_cnn_patches.npy'
-labels_path = output_dir / 'cnn_patches' / 'thermal' / 'all_cnn_labels.npy'
+data_path = "C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Outputs/Villoslada/"
+# data_path_optical = "C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Outputs/Villoslada/"
+# data_path_sar = "C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Outputs/Villoslada/"
+# data_path_all = "C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Outputs/Villoslada/"
+X_train = np.load(data_path + 'X_train.npy')
+X_valid = np.load(data_path + 'X_valid.npy')
+X_test = np.load(data_path + 'X_test.npy')
+y_train = np.load(data_path + 'y_train.npy')
+y_valid = np.load(data_path + 'y_valid.npy')
+y_test = np.load(data_path + 'y_test.npy')
 
-patches = np.load(patches_path)
-labels = np.load(labels_path)
-# some nans still present
-labels = np.nan_to_num(labels, nan=0.0)
-labels = labels.astype(np.int32)
-
-metadata_path = output_dir / 'cnn_patches' / 'metadata' / 'all_cnn_metadata.json'
-with open(metadata_path) as file:
-    metadata = json.load(file)
-print(f"Loaded CNN data - Shape: {patches.shape}")
-print(f"Loaded Labels data - Shape: {labels.shape}")
-print(f"Metadata entries: {len(metadata)}")
-print(f"First patch shape: {patches[0].shape}")
-
-
-# -------------- SPLITTING ---------------------------------------------------------------------------------------------
-X_train, X_test, y_train, y_test = train_test_split(patches, labels, test_size=0.15, random_state=42)
-# validation sets
-X_train, X_val, y_train, y_val = train_test_split(X_train, y_train, test_size=0.17647, random_state=42)
+print("Dataset loaded successfully!")
+print(f"X_train shape: {X_train.shape}")
+print(f"y_train shape: {y_train.shape}")
+print(f"X_valid shape: {X_valid.shape}")
+print(f"y_valid shape: {y_valid.shape}")
+print(f"X_test shape: {X_test.shape}")
+print(f"y_test shape: {y_test.shape}")
 
 
 # -------------- CNN U-Net ---------------------------------------------------------------------------------------------
@@ -253,7 +249,7 @@ def unet_model(size_input=(64, 64, 2), filters_base=16, classes=14, l2_reg=0.01)
                     kernel_regularizer=l2(l2_reg), name='segmentation_output')(conv10)
 
     # model defining
-    model = tf.keras.Model(inputs=inputs, outputs=output, name='unet_segmentation')
+    model = tf.keras.Model(inputs=inputs, outputs=output, name='unet_segmentation_cnn')
     model.summary()
 
     return model
@@ -325,10 +321,10 @@ class EpochTracker(tf.keras.callbacks.Callback):
         print(f"Computing metrics for epoch {current_epoch}...")
 
         predictions_list = []
-        batch_size = 3
+        batch_size = 4
         for i in range(0, len(self.X_test), batch_size):
             batch_X = self.X_test[i:i + batch_size]
-            batch_pred = self.model.predict(batch_X, verbose=0, batch_size=3)
+            batch_pred = self.model.predict(batch_X, verbose=0, batch_size=4)
             predictions_list.append(batch_pred)
 
         # Concatenate all predictions
@@ -379,7 +375,7 @@ def train_model(X_train, y_train, X_val, y_val, X_test, y_test, use_optuna=True,
 
             # Suggest hyperparameters
             learning_rate = trial.suggest_float('learning_rate', 1e-5, 1e-3, log=True)
-            batch_size = trial.suggest_categorical('batch_size', [1, 2])
+            batch_size = trial.suggest_categorical('batch_size', [1, 2, 4])
             dropout_rate = trial.suggest_float('dropout_rate', 0.1, 0.5)
             l2_reg = trial.suggest_float('l2_regularization', 0.001, 0.01, 0.1, log=True)
             weight_strength = trial.suggest_float('weight_strength', 0.5, 2.0)
@@ -436,9 +432,9 @@ def train_model(X_train, y_train, X_val, y_val, X_test, y_test, use_optuna=True,
     else:
         # Use default parameters
         best_params = {
-            'learning_rate': 0.000001,
-            'l2factor': 0.1,
-            'batch_size': 3,
+            'learning_rate': 0.0001,
+            'l2factor': 0.001,
+            'batch_size': 4,
             'filters_base': 16
         }
         # lr - 0.001 = better for 1 epoch
@@ -496,7 +492,7 @@ def train_model(X_train, y_train, X_val, y_val, X_test, y_test, use_optuna=True,
     history = model.fit(
         X_train, y_train,
         validation_data=(X_val, y_val),
-        epochs=100,
+        epochs=1,
         batch_size=best_params['batch_size'],
         callbacks=[lr_callback, early_stopping, epoch_tracker],
         verbose=1
@@ -504,7 +500,7 @@ def train_model(X_train, y_train, X_val, y_val, X_test, y_test, use_optuna=True,
 
     # Final evaluation
     print("\n=== FINAL EVALUATION ===")
-    test_loss, test_acc, test_sparse_acc = model.evaluate(X_test, y_test, batch_size=3, verbose=0)
+    test_loss, test_acc, test_sparse_acc = model.evaluate(X_test, y_test, batch_size=4, verbose=0)
     print(f"Test loss: {test_loss}")
     print(f"Test Accuracy: {test_acc}")
     print(f"Test Sparse Categorical Accuracy: {test_sparse_acc:.4f}")
@@ -512,7 +508,7 @@ def train_model(X_train, y_train, X_val, y_val, X_test, y_test, use_optuna=True,
     print("Computing final predictions...")
     predictions_list = []
     for i in range(len(X_test)):
-        pred = model.predict(X_test[i:i + 1], batch_size=3, verbose=0)
+        pred = model.predict(X_test[i:i + 1], batch_size=4, verbose=0)
         predictions_list.append(pred)
     final_predictions = np.concatenate(predictions_list, axis=0)
     predictions = np.argmax(final_predictions, axis=-1)
@@ -622,110 +618,93 @@ def plot_training(history):
     plt.show()
 
 
-def visualize_predictions(X_test, y_test, selected_epoch_predictions, selected_epoch_metrics, all_epoch_metrics, num_patches=9):
+def visualize_cnn_results(X_test, y_test, predictions, num_patches=3, patch_indices=None,
+                          figsize=(15, 5), cmap_thermal='hot', cmap_segmentation='tab20'):
     """
-    Enhanced visualization that shows predictions from each epoch for comparison.
-    Shows how the model predictions evolve over training epochs.
-    Handles overlapping patches by averaging predictions in overlapping regions.
+    Visualize CNN results showing thermal images, ground truth labels, and predictions
 
-    Args:
-        X_test: Test image patches array (N, H, W, C)
-        y_test: Ground truth label patches (N, H, W)
-        eselected_epoch_predictions: Dict of {epoch: predictions} for selected epochs
-        selected_epoch_metrics: Dict of {epoch: metrics} for selected epochs
-        all_epoch_metrics: List of all epoch metrics for plotting evolution
-        num_images: Number of full images to reconstruct and display
+    Parameters:
+    -----------
+    X_test : numpy array, shape (n_samples, 64, 64, 2)
+        Test thermal images with 2 channels
+    y_test : numpy array, shape (n_samples, 64, 64, 1)
+        Ground truth segmentation labels
+    predictions : numpy array, shape (n_samples, 64, 64)
+        Model predictions
+    num_patches : int
+        Number of patches to visualize (default: 3)
+    patch_indices : list or None
+        Specific patch indices to visualize. If None, random patches are selected
+    figsize : tuple
+        Figure size (width, height)
+    cmap_thermal : str
+        Colormap for thermal images
+    cmap_segmentation : str
+        Colormap for segmentation maps
     """
 
-    print("=== VISUALIZING EPOCH-BY-EPOCH PATCH PREDICTIONS ===")
+    # Select patches to visualize
+    if patch_indices is None:
+        patch_indices = random.sample(range(len(X_test)), num_patches)
+    else:
+        num_patches = len(patch_indices)
 
-    selected_epochs = sorted(selected_epoch_predictions.keys())
-    num_patches = min(num_patches, len(X_test))
+    # Create figure with subplots
+    fig, axes = plt.subplots(num_patches, 3, figsize=figsize)
+    if num_patches == 1:
+        axes = axes.reshape(1, -1)
 
-    print(f"Visualizing {num_patches} patches for epochs: {selected_epochs}")
+    # Set up colormap for segmentation (14 classes)
+    if cmap_segmentation == 'tab20':
+        colors = plt.cm.tab20(np.linspace(0, 1, 14))
+        seg_cmap = ListedColormap(colors)
+    else:
+        seg_cmap = cmap_segmentation
 
-    # Plot metrics evolution for ALL epochs
-    print("\n=== PLOTTING COMPLETE METRICS EVOLUTION ===")
-    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
-    axes = axes.flatten()
+    for i, patch_idx in enumerate(patch_indices):
+        # Get data for this patch
+        thermal_image = X_test[patch_idx]
+        true_labels = y_test[patch_idx].squeeze()  # Remove channel dimension
+        pred_labels = predictions[patch_idx]
 
-    metrics_to_plot = ['accuracy', 'precision', 'recall', 'f1_score', 'mean_iou', 'mean_dice']
+        # Use first thermal channel for visualization (you can modify this)
+        thermal_display = thermal_image[:, :, 0]
 
-    for i, metric in enumerate(metrics_to_plot):
-        # Plot all epochs
-        values = [epoch_metrics[metric] for epoch_metrics in all_epoch_metrics]
-        axes[i].plot(range(1, len(values) + 1), values, 'b-', linewidth=1, alpha=0.7, label='All Epochs')
+        # Column 1: Thermal Image
+        im1 = axes[i, 0].imshow(thermal_display, cmap=cmap_thermal, aspect='equal')
+        axes[i, 0].set_title(f'Patch {patch_idx + 1}: Thermal Image')
+        axes[i, 0].axis('off')
 
-        # Highlight selected epochs
-        selected_values = [selected_epoch_metrics[epoch][metric] for epoch in selected_epochs]
-        axes[i].plot(selected_epochs, selected_values, 'ro-', linewidth=2, markersize=8,
-                     label='Selected Epochs')
+        # Column 2: Ground Truth Labels
+        im2 = axes[i, 1].imshow(true_labels, cmap=seg_cmap, vmin=0, vmax=13, aspect='equal')
+        axes[i, 1].set_title(f'Patch {patch_idx + 1}: Ground Truth')
+        axes[i, 1].axis('off')
 
-        axes[i].set_title(f'{metric.replace("_", " ").title()} Evolution', fontsize=12)
-        axes[i].set_xlabel('Epoch')
-        axes[i].set_ylabel(metric.replace("_", " ").title())
-        axes[i].grid(True, alpha=0.3)
-        axes[i].set_ylim(0, 1)
-        axes[i].legend()
+        # Column 3: Predictions
+        im3 = axes[i, 2].imshow(pred_labels, cmap=seg_cmap, vmin=0, vmax=13, aspect='equal')
+        axes[i, 2].set_title(f'Patch {patch_idx + 1}: Predictions')
+        axes[i, 2].axis('off')
 
-        # Add value annotations for selected epochs
-        for epoch, val in zip(selected_epochs, selected_values):
-            axes[i].annotate(f'{val:.3f}', (epoch, val), textcoords="offset points",
-                             xytext=(0, 10), ha='center', fontsize=8, color='red', fontweight='bold')
+    # Add colorbars
+    # Thermal colorbar
+    cbar1 = plt.colorbar(im1, ax=axes[:, 0].ravel().tolist(), shrink=0.8, aspect=20)
+    cbar1.set_label('Thermal Intensity', rotation=270, labelpad=15)
+
+    # Segmentation colorbar
+    cbar2 = plt.colorbar(im2, ax=axes[:, 1:].ravel().tolist(), shrink=0.8, aspect=20)
+    cbar2.set_label('Class Labels', rotation=270, labelpad=15)
+    cbar2.set_ticks(range(14))
 
     plt.tight_layout()
-    plt.savefig('selected_epoch_metrics_evolution.png', dpi=300, bbox_inches='tight')
     plt.show()
 
-    # Visualize individual patches for selected epochs
-    for patch_idx in range(num_patches):
-        print(f"\n--- Processing Patch {patch_idx + 1}")
-
-        thermal_patch = X_test[patch_idx, :, :, 0]  # Use first channel
-        ground_truth = y_test[patch_idx]
-
-        num_epochs = len(selected_epochs)
-        rows = num_epochs
-        cols = 3  # Thermal, GT, Prediction
-
-        fig, axes = plt.subplots(rows, cols, figsize=(cols * 5, rows * 5))
-        axes = np.atleast_2d(axes)
-
-        for row_idx, epoch in enumerate(selected_epochs):
-            predictions = selected_epoch_predictions[epoch]
-
-            if predictions.ndim == 4:
-                pred_patch = np.argmax(predictions[patch_idx], axis=-1)
-            else:
-                pred_patch = predictions[patch_idx]
-
-            # Column 0: Thermal input
-            im = axes[row_idx, 0].imshow(thermal_patch, cmap='hot', aspect='equal', origin='upper')
-            axes[row_idx, 0].set_title(f'Epoch {epoch} - Thermal Input', fontsize=10)
-            axes[row_idx, 0].axis('off')
-            plt.colorbar(im, ax=axes[row_idx, 0], shrink=0.8)
-
-            # Column 1: Ground Truth
-            im = axes[row_idx, 1].imshow(ground_truth, cmap='tab20', vmin=0, vmax=13, origin='upper')
-            axes[row_idx, 1].set_title(f'Epoch {epoch} - Ground Truth', fontsize=10)
-            axes[row_idx, 1].axis('off')
-            plt.colorbar(im, ax=axes[row_idx, 1], shrink=0.8)
-
-            # Column 2: Prediction
-            im = axes[row_idx, 2].imshow(pred_patch, cmap='tab20', vmin=0, vmax=13, origin='upper')
-            acc = selected_epoch_metrics[epoch]["accuracy"]
-            iou = selected_epoch_metrics[epoch]["mean_iou"]
-            axes[row_idx, 2].set_title(f'Epoch {epoch} - Prediction\nAcc: {acc:.3f} | IoU: {iou:.3f}', fontsize=10)
-            axes[row_idx, 2].axis('off')
-            plt.colorbar(im, ax=axes[row_idx, 2], shrink=0.8)
-
-        plt.suptitle(f'Patch {patch_idx + 1} - Epoch Evolution (Each Row = 1 Epoch)', fontsize=16, y=1.02)
-        plt.tight_layout()
-        plt.savefig(f'patch_{patch_idx + 1}_vertical_epochs.png', dpi=300, bbox_inches='tight')
-        plt.show()
-
-        print(f"✅ Patch {patch_idx + 1} epoch evolution visualization complete")
-        print("-" * 70)
+    # Print accuracy for visualized patches
+    print(f"\nAccuracy for visualized patches:")
+    for i, patch_idx in enumerate(patch_indices):
+        true_labels = y_test[patch_idx].squeeze()
+        pred_labels = predictions[patch_idx]
+        accuracy = np.mean(true_labels == pred_labels)
+        print(f"Patch {patch_idx + 1}: {accuracy:.4f}")
 
 
 # -------------- WORKFLOW ----------------------------------------------------------------------------------------------
@@ -740,7 +719,7 @@ fold_results = k_fold_cross_validation(
 (model, history, predictions, best_params,
  epoch_predictions, epoch_metrics, all_epoch_metrics) = train_model(
     X_train, y_train,
-    X_val, y_val,
+    X_valid, y_valid,
     X_test, y_test,
     use_optuna=False, n_trials=5, epochs=30)
 
@@ -756,8 +735,8 @@ for param_name, param_value in best_params.items():
 
 plot_training(history)
 
-visualize_predictions(X_test, y_test, epoch_predictions, epoch_metrics,
-                      all_epoch_metrics, num_patches=5)
+visualize_cnn_results(X_test, y_test, predictions, patch_indices=[50, 690, 943])
+
 
 model.save(os.path.join('models', 'CNN_categorical.keras'))  # Native Keras format
 model.save(os.path.join('models', 'CNN_categorical.h5'))     # HDF5 format for compatibility
