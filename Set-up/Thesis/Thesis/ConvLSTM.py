@@ -38,7 +38,7 @@ from collections import defaultdict
 
 
 # -------------- LOADING DATA ------------------------------------------------------------------------------------------
-data_path = "C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Outputs/Villoslada/"
+data_path = "E:/Studies/Thesis/Code2/"
 # data_path_optical = "C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Outputs/Villoslada/convlstm"
 # data_path_sar = "C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Outputs/Villoslada/convlstm"
 # data_path_all = "C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Outputs/Villoslada/convlstm"
@@ -98,7 +98,7 @@ def clstm_unet_model(size_input=(5, 64, 64, 2), filters_base=16, classes=14, l2_
     # encoder
     conv1, skip1 = Encoder(inputs, filters_base, dropout=0, l2factor=l2_reg, max_pooling=True)  # 372 x 585
     conv2, skip2 = Encoder(conv1, filters_base * 2, dropout=0, l2factor=l2_reg, max_pooling=True)  # 186 x 292
-    conv3, skip3 = Encoder(conv2, filters_base * 4, dropout=0, l2factor=l2_reg, max_pooling=True)  # 93 x 146
+    conv3, skip3 = Encoder(conv2, filters_base * 4, dropout=0.1, l2factor=l2_reg, max_pooling=True)  # 93 x 146
     conv4, skip4 = Encoder(conv3, filters_base * 8, dropout=0.2, l2factor=l2_reg, max_pooling=True)  # 46 x 73
     conv5, skip5 = Encoder(conv4, filters_base * 16, dropout=0.2, l2factor=l2_reg, max_pooling=True)  # 23 x 36
 
@@ -308,9 +308,9 @@ def train_evaluate_model(X_train, y_train, X_val, y_val, X_test, y_test, use_opt
     else:
         # Use default parameters
         best_params = {
-            'learning_rate': 0.00001,
+            'learning_rate': 0.0001,
             'l2factor': 0.1,
-            'batch_size': 4,
+            'batch_size': 8,
             'filters_base': 16
         }
         print("=== USING DEFAULT PARAMETERS (NO OPTUNA) ===")
@@ -344,8 +344,8 @@ def train_evaluate_model(X_train, y_train, X_val, y_val, X_test, y_test, use_opt
     lr_callback = tf.keras.callbacks.ReduceLROnPlateau(
         monitor='val_loss',
         factor=0.5,
-        patience=5,
-        min_lr=1e-6,
+        patience=8,
+        min_lr=1e-5,
         verbose=1
     )
     early_stopping = tf.keras.callbacks.EarlyStopping(
@@ -359,7 +359,7 @@ def train_evaluate_model(X_train, y_train, X_val, y_val, X_test, y_test, use_opt
     history = model.fit(
         X_train, y_train,
         validation_data=(X_val, y_val),
-        epochs=1,
+        epochs=100,
         batch_size=best_params['batch_size'],
         callbacks=[lr_callback, early_stopping, epoch_tracker],
         verbose=1

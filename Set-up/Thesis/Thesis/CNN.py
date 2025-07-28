@@ -114,10 +114,7 @@ print(f"Label range: {np.min(y_train)} to {np.max(y_train)}")
 '''
 
 # -------------- LOADING -----------------------------------------------------------------------------------------------
-data_path = "C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Outputs/Villoslada/"
-# data_path_optical = "C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Outputs/Villoslada/"
-# data_path_sar = "C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Outputs/Villoslada/"
-# data_path_all = "C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Outputs/Villoslada/"
+data_path = "E:/Studies/Thesis/Code2/"
 X_train = np.load(data_path + 'X_train.npy')
 X_valid = np.load(data_path + 'X_valid.npy')
 X_test = np.load(data_path + 'X_test.npy')
@@ -220,14 +217,14 @@ def unet_model(size_input=(64, 64, 2), filters_base=16, classes=14, l2_reg=0.01)
 
     # encoder with multiple convolutional layers with different maxpooling, dropout and filters
     # filters increase the deeper into the network it reaches to increase channel size
-    conv1, skip1 = Encoder(inputs, filters_base, dropout=0, l2factor=l2_reg, max_pooling=True)  # 372 x 585
-    conv2, skip2 = Encoder(conv1, filters_base * 2, dropout=0, l2factor=l2_reg, max_pooling=True)  # 186 x 292
-    conv3, skip3 = Encoder(conv2, filters_base * 4, dropout=0, l2factor=l2_reg, max_pooling=True)  # 93 x 146
+    conv1, skip1 = Encoder(inputs, filters_base, dropout=0.0, l2factor=l2_reg, max_pooling=True)  # 372 x 585
+    conv2, skip2 = Encoder(conv1, filters_base * 2, dropout=0.0, l2factor=l2_reg, max_pooling=True)  # 186 x 292
+    conv3, skip3 = Encoder(conv2, filters_base * 4, dropout=0.0, l2factor=l2_reg, max_pooling=True)  # 93 x 146
     conv4, skip4 = Encoder(conv3, filters_base * 8, dropout=0.2, l2factor=l2_reg, max_pooling=True)  # 46 x 73
     conv5, skip5 = Encoder(conv4, filters_base * 16, dropout=0.2, l2factor=l2_reg, max_pooling=True)  # 23 x 36
 
     # bottleneck (last layer before upscaling)
-    bottleneck, _ = Encoder(conv5, filters_base*32, dropout=0.3, l2factor=l2_reg*2, max_pooling=False)
+    bottleneck, _ = Encoder(conv5, filters_base*32, dropout=0.3, l2factor=l2_reg, max_pooling=False)
     # maxpooling in last convolution as upscaling starts here
 
     # decoder with reducing filters with skip connections from encoder given as input
@@ -249,7 +246,7 @@ def unet_model(size_input=(64, 64, 2), filters_base=16, classes=14, l2_reg=0.01)
                     kernel_regularizer=l2(l2_reg), name='segmentation_output')(conv10)
 
     # model defining
-    model = tf.keras.Model(inputs=inputs, outputs=output, name='unet_segmentation_cnn')
+    model = tf.keras.Model(inputs=inputs, outputs=output, name='unet_segmentation')
     model.summary()
 
     return model
@@ -288,13 +285,14 @@ def combined_loss(class_weights, focal_alpha=0.25, focal_gamma=2.0, ce_weight=0.
 
 
 class EpochTracker(tf.keras.callbacks.Callback):
-    """Custom callback to track predictions and metrics at each epoch"""
+    """Enhanced callback to track predictions and per-class metrics at each epoch"""
 
-    def __init__(self, X_test, y_test, compute_metrics_fn):
+    def __init__(self, X_test, y_test, compute_metrics_fn, show_per_class=True):
         super().__init__()
         self.X_test = X_test
         self.y_test = y_test
         self.compute_metrics_fn = compute_metrics_fn
+        self.show_per_class = show_per_class
         self.epoch_predictions = []
         self.epoch_metrics = []
         self.selected_epoch_predictions = {}
@@ -318,7 +316,9 @@ class EpochTracker(tf.keras.callbacks.Callback):
 
     def on_epoch_end(self, epoch, logs=None):
         current_epoch = epoch + 1
-        print(f"Computing metrics for epoch {current_epoch}...")
+        print(f"\n{'=' * 60}")
+        print(f"EPOCH {current_epoch} - DETAILED METRICS")
+        print(f"{'=' * 60}")
 
         predictions_list = []
         batch_size = 4
@@ -333,7 +333,7 @@ class EpochTracker(tf.keras.callbacks.Callback):
         # Convert to class indices for metrics
         pred_classes = np.argmax(predictions, axis=-1)
 
-        # Compute metrics
+        # Compute metrics with per-class details
         metrics = self.compute_metrics_fn(self.y_test, pred_classes)
 
         # Always store metrics (lightweight)
@@ -341,20 +341,62 @@ class EpochTracker(tf.keras.callbacks.Callback):
 
         # Only store predictions for selected epochs (memory intensive)
         if current_epoch in self.epochs_to_store:
-            print(f"  → Storing predictions for epoch {current_epoch} (selected epoch)")
+            print(f"→ Storing predictions for epoch {current_epoch} (selected epoch)")
             self.selected_epoch_predictions[current_epoch] = pred_classes.copy()
             self.selected_epoch_metrics[current_epoch] = metrics.copy()
-        else:
-            print(f"  → Skipping prediction storage for epoch {current_epoch}")
 
-        # Print epoch summary
-        print(f"Epoch {current_epoch} - Test Accuracy: {metrics['accuracy']:.4f}, "
-              f"Mean IoU: {metrics['mean_iou']:.4f}")
+        # Print training metrics from logs
+        if logs:
+            print(f"\nTraining Metrics:")
+            print(f"Loss: {logs.get('loss', 'N/A'):.4f} | Val Loss: {logs.get('val_loss', 'N/A'):.4f}")
+            print(f"Accuracy: {logs.get('accuracy', 'N/A'):.4f} | Val Accuracy: {logs.get('val_accuracy', 'N/A'):.4f}")
+
+        # Print summary
+        print(f"\nTest Set Performance Summary:")
+        print(f"Overall Accuracy: {metrics['accuracy']:.4f}")
+        print(f"Mean IoU (excluding background): {metrics['mean_iou']:.4f}")
+        print(f"Mean IoU (all classes): {metrics['mean_iou_all']:.4f}")
+
+        # Show worst and best performing classes
+        if 'per_class_iou' in metrics:
+            iou_items = list(metrics['per_class_iou'].items())
+            iou_items.sort(key=lambda x: x[1])  # Sort by IoU score
+
+            print(f"\nWorst performing classes:")
+            for class_name, iou in iou_items[:3]:  # Show 3 worst
+                print(f"  {class_name}: {iou:.4f}")
+
+            print(f"\nBest performing classes:")
+            for class_name, iou in iou_items[-3:]:  # Show 3 best
+                print(f"  {class_name}: {iou:.4f}")
+
+        print(f"{'=' * 60}\n")
 
         # Memory cleanup
         del predictions, pred_classes
         import gc
         gc.collect()
+
+    def get_class_performance_summary(self):
+        """Get a summary of class performance across all epochs"""
+        if not self.epoch_metrics:
+            return None
+
+        # Get the latest epoch metrics
+        latest_metrics = self.epoch_metrics[-1]
+
+        if 'per_class_iou' not in latest_metrics:
+            return None
+
+        # Sort classes by performance
+        iou_items = list(latest_metrics['per_class_iou'].items())
+        iou_items.sort(key=lambda x: x[1], reverse=True)
+
+        return {
+            'sorted_classes': iou_items,
+            'mean_iou': latest_metrics['mean_iou'],
+            'accuracy': latest_metrics['accuracy']
+        }
 
 
 # -------------- TRAINING & EVALUATION ---------------------------------------------------------------------------------
@@ -375,10 +417,9 @@ def train_model(X_train, y_train, X_val, y_val, X_test, y_test, use_optuna=True,
 
             # Suggest hyperparameters
             learning_rate = trial.suggest_float('learning_rate', 1e-5, 1e-3, log=True)
-            batch_size = trial.suggest_categorical('batch_size', [1, 2, 4])
+            batch_size = trial.suggest_categorical('batch_size', [2, 4])
             dropout_rate = trial.suggest_float('dropout_rate', 0.1, 0.5)
             l2_reg = trial.suggest_float('l2_regularization', 0.001, 0.01, 0.1, log=True)
-            weight_strength = trial.suggest_float('weight_strength', 0.5, 2.0)
             filters_base = trial.suggest_categorical('filters_base', [16, 32, 64])
 
             try:
@@ -432,8 +473,8 @@ def train_model(X_train, y_train, X_val, y_val, X_test, y_test, use_optuna=True,
     else:
         # Use default parameters
         best_params = {
-            'learning_rate': 0.0001,
-            'l2factor': 0.001,
+            'learning_rate': 0.00001,
+            'l2_reg': 0.1,
             'batch_size': 4,
             'filters_base': 16
         }
@@ -451,18 +492,25 @@ def train_model(X_train, y_train, X_val, y_val, X_test, y_test, use_optuna=True,
         size_input=(64, 64, 2),
         filters_base=best_params['filters_base'],
         classes=14,
-        l2_reg=best_params['l2factor'])
+        l2_reg=best_params['l2_reg'])
 
     print("Model output shape:", model.output_shape)
+
+    class_weights = {
+        0: 1.0,  # NaNs (background)
+        1: 50.0,  # Sand - heavily underrepresented
+        2: 40.0,  # Clay
+        4: 100.0,  # Silt - very rare
+        5: 200.0,  # Peat - extremely rare
+        7: 1.0,  # Detritic - dominant class
+        8: 5.0,  # Carbonate
+        9: 500.0,  # Volcanic - almost extinct
+        10: 500.0  # Plutonic - almost extinct
+    }
 
     # Compile with optimized parameters
     optimizer = tf.keras.optimizers.Adam(learning_rate=best_params['learning_rate'])
     loss = tf.keras.losses.SparseCategoricalCrossentropy()
-    # class_weights = {0: 0., 1: 1., 2: 1., 3: 1.,
-                     # 4: 1., 5: 1., 6: 1., 7: 1.,
-                     # 8: 1., 9: 1., 10: 1., 11: 1.,
-                     # 12: 1.0, 13: 1.0}
-    # loss = combined_loss(class_weights, focal_alpha=0.25, focal_gamma=2.0)
 
     model.compile(
         optimizer=optimizer,
@@ -471,7 +519,7 @@ def train_model(X_train, y_train, X_val, y_val, X_test, y_test, use_optuna=True,
     )
 
     # Initialize the tracker
-    epoch_tracker = EpochTracker(X_test, y_test, compute_metrics)
+    epoch_tracker = EpochTracker(X_test, y_test, compute_metrics, show_per_class=True)
 
     # Other callbacks
     lr_callback = tf.keras.callbacks.ReduceLROnPlateau(
@@ -484,15 +532,14 @@ def train_model(X_train, y_train, X_val, y_val, X_test, y_test, use_optuna=True,
     early_stopping = tf.keras.callbacks.EarlyStopping(
         monitor='val_loss',
         patience=7,
-        restore_best_weights=True
-    )
+        restore_best_weights=True)
 
     # Training with epoch tracking
     print("Training final CNN model...")
     history = model.fit(
         X_train, y_train,
         validation_data=(X_val, y_val),
-        epochs=1,
+        epochs=100,
         batch_size=best_params['batch_size'],
         callbacks=[lr_callback, early_stopping, epoch_tracker],
         verbose=1
@@ -531,7 +578,7 @@ def train_model(X_train, y_train, X_val, y_val, X_test, y_test, use_optuna=True,
 
 
 # -------------- PERFORMANCE -------------------------------------------------------------------------------------------
-def compute_metrics(y_true, y_pred):
+def compute_metrics(y_true, y_pred, class_names=None, print_results=True):
     """
     Compute metrics for segmentation task
     Args:
@@ -541,56 +588,74 @@ def compute_metrics(y_true, y_pred):
     print("Computing metrics for full images...")
     # Convert predictions to class indices if they're probabilities
     # Flatten for metric calculation
-    y_true_flat = y_true.flatten()
-    y_pred_flat = y_pred.flatten()
+    # Flatten arrays if they're not already
+    if len(y_true.shape) > 1:
+        y_true_flat = y_true.flatten()
+    else:
+        y_true_flat = y_true
 
-    # remove any padding/invalid values
-    valid_mask = (y_true_flat >= 0) & (y_true_flat < 14)
-    y_true_flat = y_true_flat[valid_mask]
-    y_pred_flat = y_pred_flat[valid_mask]
+    if len(y_pred.shape) > 1:
+        y_pred_flat = y_pred.flatten()
+    else:
+        y_pred_flat = y_pred
 
-    accuracy = accuracy_score(y_true_flat, y_pred_flat)
-    precision = precision_score(y_true_flat, y_pred_flat, average='macro', zero_division=0)
-    recall = recall_score(y_true_flat, y_pred_flat, average='macro', zero_division=0)
-    f1 = f1_score(y_true_flat, y_pred_flat, average='macro', zero_division=0)
-
-    # Calculate IoU and Dice for each class then average
+    # Get unique classes present in the data
     unique_classes = np.unique(np.concatenate([y_true_flat, y_pred_flat]))
-    iou_values = []
-    dice_values = []
+    n_classes = len(unique_classes)
 
-    for cls in unique_classes:
-        if cls < 0 or cls >= 14:
-            continue
+    # Compute confusion matrix
+    cm = confusion_matrix(y_true_flat, y_pred_flat, labels=unique_classes)
 
-        y_true_cls = (y_true_flat == cls)
-        y_pred_cls = (y_pred_flat == cls)
+    # Calculate per-class IoU
+    per_class_iou = {}
+    iou_scores = []
 
-        intersection = np.logical_and(y_true_cls, y_pred_cls).sum()
-        union = np.logical_or(y_true_cls, y_pred_cls).sum()
+    for i, class_id in enumerate(unique_classes):
+        # IoU = TP / (TP + FP + FN)
+        tp = cm[i, i]  # True positives
+        fp = cm[:, i].sum() - tp  # False positives
+        fn = cm[i, :].sum() - tp  # False negatives
 
-        if union > 0:
-            iou = intersection/union
-            dice = (2 * intersection) / (np.sum(y_true_cls) + np.sum(y_pred_cls) + 1e-7)
+        if tp + fp + fn == 0:
+            iou = 0.0  # Handle case where class doesn't appear
         else:
-            iou = 0.0
-            dice = 0.0
-        iou_values.append(iou)
-        dice_values.append(dice)
+            iou = tp / (tp + fp + fn)
 
-    mean_iou = np.mean(iou_values)
-    mean_dice = np.mean(dice_values)
+        class_name = class_names[class_id] if class_names else f"Class_{class_id}"
+        per_class_iou[class_name] = iou
+        iou_scores.append(iou)
 
-    metrics = {
+        if print_results:
+            print(f"{class_name} (ID: {class_id}): IoU = {iou:.4f} | TP={tp}, FP={fp}, FN={fn}")
+
+    # Calculate mean IoU (excluding background class 0 if present)
+    if 0 in unique_classes and len(unique_classes) > 1:
+        # Exclude background class from mean IoU calculation
+        non_bg_ious = [iou for i, iou in enumerate(iou_scores) if unique_classes[i] != 0]
+        mean_iou = np.mean(non_bg_ious) if non_bg_ious else 0.0
+        mean_iou_all = np.mean(iou_scores)
+    else:
+        mean_iou = np.mean(iou_scores)
+        mean_iou_all = mean_iou
+
+    # Overall accuracy
+    accuracy = np.sum(y_true_flat == y_pred_flat) / len(y_true_flat)
+
+    if print_results:
+        print(f"\nOverall Metrics:")
+        print(f"Accuracy: {accuracy:.4f}")
+        print(f"Mean IoU (excluding background): {mean_iou:.4f}")
+        print(f"Mean IoU (all classes): {mean_iou_all:.4f}")
+        print("-" * 50)
+
+    return {
         'accuracy': accuracy,
-        'precision': precision,
-        'recall': recall,
-        'f1_score': f1,
         'mean_iou': mean_iou,
-        'mean_dice': mean_dice,
+        'mean_iou_all': mean_iou_all,
+        'per_class_iou': per_class_iou,
+        'iou_scores': iou_scores,
+        'unique_classes': unique_classes
     }
-
-    return metrics
 
 
 def plot_training(history):
@@ -619,7 +684,7 @@ def plot_training(history):
 
 
 def visualize_cnn_results(X_test, y_test, predictions, num_patches=3, patch_indices=None,
-                          figsize=(15, 5), cmap_thermal='hot', cmap_segmentation='tab20'):
+                          figsize=(20, 10), cmap_thermal='hot', cmap_segmentation='tab20'):
     """
     Visualize CNN results showing thermal images, ground truth labels, and predictions
 
@@ -650,7 +715,7 @@ def visualize_cnn_results(X_test, y_test, predictions, num_patches=3, patch_indi
         num_patches = len(patch_indices)
 
     # Create figure with subplots
-    fig, axes = plt.subplots(num_patches, 3, figsize=figsize)
+    fig, axes = plt.subplots(num_patches, 3, figsize=figsize, constrained_layout=True)
     if num_patches == 1:
         axes = axes.reshape(1, -1)
 
@@ -668,7 +733,7 @@ def visualize_cnn_results(X_test, y_test, predictions, num_patches=3, patch_indi
         pred_labels = predictions[patch_idx]
 
         # Use first thermal channel for visualization (you can modify this)
-        thermal_display = thermal_image[:, :, 0]
+        thermal_display = thermal_image[:, :, 1]
 
         # Column 1: Thermal Image
         im1 = axes[i, 0].imshow(thermal_display, cmap=cmap_thermal, aspect='equal')
@@ -695,7 +760,6 @@ def visualize_cnn_results(X_test, y_test, predictions, num_patches=3, patch_indi
     cbar2.set_label('Class Labels', rotation=270, labelpad=15)
     cbar2.set_ticks(range(14))
 
-    plt.tight_layout()
     plt.show()
 
     # Print accuracy for visualized patches
@@ -721,13 +785,36 @@ fold_results = k_fold_cross_validation(
     X_train, y_train,
     X_valid, y_valid,
     X_test, y_test,
-    use_optuna=False, n_trials=5, epochs=30)
+    use_optuna=False, n_trials=5, epochs=10)
 
-final_metrics = compute_metrics(y_test, predictions)
+class_names = [
+    "NaNs",      # Class 0
+    "Sand",         # Class 1
+    "Clay",         # Class 2
+    "Chalk",         # Class 3
+    "Silt",         # Class 4
+    "Peat",         # Class 5
+    "Loam",         # Class 6
+    "Detritic",         # Class 7
+    "Carbonate",         # Class 8
+    "Volcanic",         # Class 9
+    "Plutonic",        # Class 10
+    "Foliated",        # Class 11
+    "Non-Foliated",        # Class 12
+    "Water"         # Class 13
+]
+final_metrics = compute_metrics(y_test, predictions, class_names=class_names)
 
 print("\n=== FINAL PERFORMANCE METRICS ===")
 for metric_name, metric_value in final_metrics.items():
-    print(f"{metric_name}: {metric_value:.4f}")
+    if metric_name == 'per_class_iou':
+        print(f"{metric_name}:")
+        for class_name, iou_value in metric_value.items():
+            print(f"  {class_name}: {iou_value:.4f}")
+    elif isinstance(metric_value, (int, float, np.floating)):
+        print(f"{metric_name}: {metric_value:.4f}")
+    else:
+        print(f"{metric_name}: {metric_value}")
 
 print("\n=== BEST PARAMETERS ===")
 for param_name, param_value in best_params.items():
@@ -735,7 +822,7 @@ for param_name, param_value in best_params.items():
 
 plot_training(history)
 
-visualize_cnn_results(X_test, y_test, predictions, patch_indices=[50, 690, 943])
+visualize_cnn_results(X_test, y_test, predictions, figsize=(18, 10), patch_indices=[211, 502, 900])
 
 
 model.save(os.path.join('models', 'CNN_categorical.keras'))  # Native Keras format

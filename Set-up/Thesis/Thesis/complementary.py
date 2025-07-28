@@ -8,7 +8,7 @@ from PIL import Image
 import tensorflow as tf
 from sklearn.model_selection import train_test_split
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 
 def extract_date_from_filename(filename):
@@ -253,9 +253,210 @@ def load_combined_thermal_data_filtered(grouped_files, filtered_dates):
     return combined_data
 
 
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
-from datetime import datetime, timedelta
+def extract_date_from_optical_filename(filename):
+    """Extract date from optical filename format: LC08_L2SP_200033_20210801_..."""
+    match = re.search(r'_(\d{8})_', filename)
+    if match:
+        date_str = match.group(1)
+        return datetime.strptime(date_str, '%Y%m%d').strftime('%Y%j')  # Convert to YYYYDDD format
+    return None
+
+
+def extract_date_from_sar_filename(filename):
+    """Extract date from SAR filename format: S1A_VV_VH_20190110"""
+    match = re.search(r'_(\d{8})$', filename.replace('.tif', ''))
+    if match:
+        date_str = match.group(1)
+        return datetime.strptime(date_str, '%Y%m%d').strftime('%Y%j')  # Convert to YYYYDDD format
+    return None
+
+
+def group_optical_files_by_date(optical_dir):
+    """Group optical files (R, G, B) by date."""
+    grouped_files = {}
+
+    for filename in os.listdir(optical_dir):
+        if filename.endswith('.tif'):
+            date = extract_date_from_optical_filename(filename)
+            if date:
+                if date not in grouped_files:
+                    grouped_files[date] = {}
+
+                if '_B2' in filename or 'Blue' in filename:
+                    grouped_files[date]['blue'] = os.path.join(optical_dir, filename)
+                elif '_B3' in filename or 'Green' in filename:
+                    grouped_files[date]['green'] = os.path.join(optical_dir, filename)
+                elif '_B4' in filename or 'Red' in filename:
+                    grouped_files[date]['red'] = os.path.join(optical_dir, filename)
+
+    return grouped_files
+
+
+def group_sar_files_by_date(sar_dir):
+    """Group SAR files by date."""
+    grouped_files = {}
+
+    for filename in os.listdir(sar_dir):
+        if filename.endswith('.tif'):
+            date = extract_date_from_sar_filename(filename)
+            if date:
+                grouped_files[date] = os.path.join(sar_dir, filename)
+
+    return grouped_files
+
+
+def create_multimodal_full_images(thermal_data_list, quality_masks, filtered_dates,
+                                  optical_grouped=None, sar_grouped=None):
+    """
+    Combine thermal with optical/SAR data at full resolution before windowing.
+
+    Returns:
+        Dictionary with different data combinations, each containing (data_list, mask_list)
+    """
+
+    def thermal_date_to_standard(date_str):
+        """Convert thermal date format to YYYYDDD for matching"""
+        match = re.match(r"(\d{4})(\d{3})(\d{6})", date_str)
+        if match:
+            year = match.group(1)
+            doy = match.group(2)
+            return f"{year}{doy}"
+        return None
+
+    results = {
+        'thermal_only': ([], []),
+        'thermal_optical': ([], []),
+        'thermal_sar': ([], []),
+        'thermal_optical_sar': ([], [])
+    }
+
+    for idx, (thermal_array, quality_mask, date_str) in enumerate(
+            zip(thermal_data_list, quality_masks, filtered_dates)):
+        print(f"Processing date {idx + 1}/{len(thermal_data_list)}: {date_str}")
+
+        # Always add thermal-only
+        results['thermal_only'][0].append(thermal_array)
+        results['thermal_only'][1].append(quality_mask)
+
+        # Convert date for matching
+        thermal_date = thermal_date_to_standard(date_str)
+        if not thermal_date:
+            print(f"  Warning: Could not parse thermal date {date_str}")
+            continue
+
+        # Get thermal image dimensions for resizing
+        _, thermal_height, thermal_width = thermal_array.shape
+
+        optical_data = None
+        sar_data = None
+
+        # Try to load and resize optical data
+        if optical_grouped and thermal_date in optical_grouped:
+            optical_files = optical_grouped[thermal_date]
+            if all(channel in optical_files for channel in ['red', 'green', 'blue']):
+                try:
+                    # Load RGB channels
+                    red = tifffile.imread(optical_files['red'])
+                    green = tifffile.imread(optical_files['green'])
+                    blue = tifffile.imread(optical_files['blue'])
+
+                    # Ensure 2D and resize to match thermal
+                    if len(red.shape) > 2:
+                        red = red[:, :, 0] if len(red.shape) == 3 else red
+                    if len(green.shape) > 2:
+                        green = green[:, :, 0] if len(green.shape) == 3 else green
+                    if len(blue.shape) > 2:
+                        blue = blue[:, :, 0] if len(blue.shape) == 3 else blue
+
+                    # Resize using the same function as thermal preprocessing
+                    red_resized = resample_to_match_array(red, (thermal_height, thermal_width))
+                    green_resized = resample_to_match_array(green, (thermal_height, thermal_width))
+                    blue_resized = resample_to_match_array(blue, (thermal_height, thermal_width))
+
+                    # Stack as (3, height, width) to match thermal format
+                    optical_data = np.stack([red_resized, green_resized, blue_resized], axis=0)
+                    print(f"  ✓ Optical data loaded and resized to {optical_data.shape}")
+
+                except Exception as e:
+                    print(f"  ✗ Error loading optical data: {e}")
+
+        # Try to load and resize SAR data
+        if sar_grouped and thermal_date in sar_grouped:
+            try:
+                sar_image = tifffile.imread(sar_grouped[thermal_date])
+
+                # Handle SAR format and resize
+                if len(sar_image.shape) == 3 and sar_image.shape[0] == 2:
+                    # (2, H, W) format - resize each channel
+                    vv_resized = resample_to_match_array(sar_image[0], (thermal_height, thermal_width))
+                    vh_resized = resample_to_match_array(sar_image[1], (thermal_height, thermal_width))
+                    sar_data = np.stack([vv_resized, vh_resized], axis=0)
+                elif len(sar_image.shape) == 3 and sar_image.shape[2] == 2:
+                    # (H, W, 2) format - transpose and resize
+                    sar_transposed = np.transpose(sar_image, (2, 0, 1))
+                    vv_resized = resample_to_match_array(sar_transposed[0], (thermal_height, thermal_width))
+                    vh_resized = resample_to_match_array(sar_transposed[1], (thermal_height, thermal_width))
+                    sar_data = np.stack([vv_resized, vh_resized], axis=0)
+                elif len(sar_image.shape) == 2:
+                    # Single channel - duplicate
+                    sar_resized = resample_to_match_array(sar_image, (thermal_height, thermal_width))
+                    sar_data = np.stack([sar_resized, sar_resized], axis=0)
+                else:
+                    print(f"  ✗ Unsupported SAR shape: {sar_image.shape}")
+                    continue
+
+                print(f"  ✓ SAR data loaded and resized to {sar_data.shape}")
+
+            except Exception as e:
+                print(f"  ✗ Error loading SAR data: {e}")
+
+        # Create combinations
+        if optical_data is not None:
+            thermal_optical = np.concatenate([thermal_array, optical_data], axis=0)
+            results['thermal_optical'][0].append(thermal_optical)
+            results['thermal_optical'][1].append(quality_mask)
+
+        if sar_data is not None:
+            thermal_sar = np.concatenate([thermal_array, sar_data], axis=0)
+            results['thermal_sar'][0].append(thermal_sar)
+            results['thermal_sar'][1].append(quality_mask)
+
+        if optical_data is not None and sar_data is not None:
+            thermal_optical_sar = np.concatenate([thermal_array, optical_data, sar_data], axis=0)
+            results['thermal_optical_sar'][0].append(thermal_optical_sar)
+            results['thermal_optical_sar'][1].append(quality_mask)
+
+    # Print statistics
+    for combo_name, (data_list, mask_list) in results.items():
+        if len(data_list) > 0:
+            channels = data_list[0].shape[0]
+            print(f"  {combo_name}: {len(data_list)} images with {channels} channels")
+        else:
+            print(f"  {combo_name}: 0 images")
+
+    return results
+
+
+def resample_to_match_array(source_array, target_shape):
+    """
+    Resample a 2D array to match target shape.
+
+    Args:
+        source_array: 2D numpy array
+        target_shape: (height, width) tuple
+
+    Returns:
+        Resampled 2D array
+    """
+    from PIL import Image as PILImage
+
+    if source_array.shape == target_shape:
+        return source_array
+
+    # Use PIL for resizing
+    pil_image = PILImage.fromarray(source_array)
+    resized = pil_image.resize((target_shape[1], target_shape[0]), PILImage.LANCZOS)
+    return np.array(resized)
 
 
 def create_thermal_dataset(thermal_data_list, quality_masks, mask_file, window_size=64, stride=64,
@@ -594,7 +795,69 @@ def create_time_sequences_from_patches(X_train, X_valid, X_test, y_train, y_vali
     return X_train_seq, X_valid_seq, X_test_seq, y_train_seq, y_valid_seq, y_test_seq
 
 
-def process_ecostress_thermal_data(data_dir, mask_file, target_shape_thermal=(64, 64, 2),
+def train_test_split_custom(X, y, test_size=0.15, validation_size=0.15, random_state=42):
+    """Custom split function matching the original logic"""
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=random_state)
+    val_size_relative = validation_size / (1 - test_size)
+    X_train, X_valid, y_train, y_valid = train_test_split(X_train, y_train, test_size=val_size_relative,
+                                                          random_state=random_state)
+
+    # Convert no-data values to 0 in masks
+    for i in range(y_train.shape[0]):
+        y_train[i, :, :] = tf.where(y_train[i, :, :] == 25, 0, y_train[i, :, :])
+    for i in range(y_valid.shape[0]):
+        y_valid[i, :, :] = tf.where(y_valid[i, :, :] == 25, 0, y_valid[i, :, :])
+    for i in range(y_test.shape[0]):
+        y_test[i, :, :] = tf.where(y_test[i, :, :] == 25, 0, y_test[i, :, :])
+
+    return X_train, X_valid, X_test, y_train, y_valid, y_test
+
+
+def normalize_thermal_channels_only(X_train, X_valid, X_test):
+    """Normalize only the first 2 channels (thermal), leave others unchanged"""
+    print("Normalizing thermal channels (0 and 1) only...")
+
+    for band in range(2):  # Only thermal channels
+        print(f"Processing thermal band {band + 1}/2")
+
+        train_band_data = X_train[:, :, :, band].flatten()
+        valid_pixels = train_band_data[(train_band_data != 0) & (~np.isnan(train_band_data))]
+
+        if len(valid_pixels) > 0:
+            min_val = np.min(valid_pixels)
+            max_val = np.max(valid_pixels)
+
+            print(f"  Band {band + 1} BEFORE: min={min_val:.4f}, max={max_val:.4f}")
+
+            if max_val != min_val:
+                train_mask = (X_train[:, :, :, band] != 0) & (~np.isnan(X_train[:, :, :, band]))
+                valid_mask = (X_valid[:, :, :, band] != 0) & (~np.isnan(X_valid[:, :, :, band]))
+                test_mask = (X_test[:, :, :, band] != 0) & (~np.isnan(X_test[:, :, :, band]))
+
+                # Normalize to 0-1 range
+                X_train[:, :, :, band] = np.where(train_mask,
+                                                  (X_train[:, :, :, band] - min_val) / (max_val - min_val), 0)
+                X_valid[:, :, :, band] = np.where(valid_mask,
+                                                  (X_valid[:, :, :, band] - min_val) / (max_val - min_val), 0)
+                X_test[:, :, :, band] = np.where(test_mask,
+                                                 (X_test[:, :, :, band] - min_val) / (max_val - min_val), 0)
+
+                # Verify normalization
+                train_normalized = X_train[:, :, :, band][train_mask]
+                if len(train_normalized) > 0:
+                    actual_min = np.min(train_normalized)
+                    actual_max = np.max(train_normalized)
+                    print(f"  Band {band + 1} AFTER: min={actual_min:.4f}, max={actual_max:.4f}")
+            else:
+                print(f"  Warning: Band {band + 1} has constant values")
+        else:
+            print(f"  Warning: Band {band + 1} has no valid pixels")
+
+    return X_train, X_valid, X_test
+
+
+def process_ecostress_thermal_data(data_dir, mask_file, optical_dir=None, sar_dir=None,
+                                   target_shape_thermal=(64, 64, 2),
                                    target_shape_mask=(64, 64, 1), max_cloud_percentage=10,
                                    max_bad_percentage=10, sequence_length=5, overlap=2):
     """
@@ -629,67 +892,106 @@ def process_ecostress_thermal_data(data_dir, mask_file, target_shape_thermal=(64
     print("\nStep 3: Loading thermal data for filtered dates...")
     thermal_data_combined = load_combined_thermal_data_filtered(grouped_files, filtered_dates)
     quality_masks = [date_masks[date] for date in filtered_dates]
-
     print(f"Loaded {len(thermal_data_combined)} thermal images")
 
-    print("\nStep 4: Creating windowed dataset...")
-    create_thermal_dataset(thermal_data_combined, quality_masks, mask_file)
+    print("\nStep 3.5: Loading optical and SAR data...")
+    optical_grouped = None
+    sar_grouped = None
 
-    print("\nStep 5: Loading windowed data...")
-    thermal_list, mask_list = load_thermal_data("./data_thermal/thermal", "./data_thermal/mask")
+    if optical_dir and os.path.exists(optical_dir):
+        optical_grouped = group_optical_files_by_date(optical_dir)
+        print(f"Found optical data for {len(optical_grouped)} dates")
 
-    print("\nStep 6: Preprocessing data...")
-    X, y = preprocess_thermal_data(thermal_list, mask_list, target_shape_thermal,
-                                   target_shape_mask, "./data_thermal/thermal", "./data_thermal/mask")
-    print(f"Debug: NaN count in X: {np.sum(np.isnan(X))}")
-    print(f"Debug: Zero count in X: {np.sum(X == 0)}")
-    print(f"Debug: Total pixels in X: {X.size}")
+    if sar_dir and os.path.exists(sar_dir):
+        sar_grouped = group_sar_files_by_date(sar_dir)
+        print(f"Found SAR data for {len(sar_grouped)} dates")
 
-    print("\nStep 7: Splitting and normalizing data...")
-    X_train, X_valid, X_test, y_train, y_valid, y_test = split_and_normalize_thermal_data(X, y)
-    print(f"\nFinal dataset shapes:")
-    print(f"Thermal data (X): {X_train.shape}")  # Should be (samples, 64, 64, 2)
-    print(f"Mask data (y): {y_train.shape}")  # Should be (samples, 64, 64, 1)
-    print(f"\nCNN compatibility: {'✓' if len(X_train.shape) == 4 else '✗'}")
-    print(f"ConvLSTM compatibility: {'✓' if len(X_train.shape) == 4 else '✗'}")
-
-    print("\nStep 8: Saving CNN processed dataset...")
-    save_dir = "C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Outputs/Villoslada"
-    os.makedirs(save_dir, exist_ok=True)
-    np.save(os.path.join(save_dir, 'X_train.npy'), X_train)
-    np.save(os.path.join(save_dir, 'X_valid.npy'), X_valid)
-    np.save(os.path.join(save_dir, 'X_test.npy'), X_test)
-    np.save(os.path.join(save_dir, 'y_train.npy'), y_train)
-    np.save(os.path.join(save_dir, 'y_valid.npy'), y_valid)
-    np.save(os.path.join(save_dir, 'y_test.npy'), y_test)
-    print("Dataset saved for CNN")
-
-    print("\nStep 9: Saving ConvLSTM processed dataset...")
-    X_train_seq, X_valid_seq, X_test_seq, y_train_seq, y_valid_seq, y_test_seq = create_time_sequences_from_patches(
-        X_train, X_valid, X_test, y_train, y_valid, y_test,
-        sequence_length=sequence_length, overlap=overlap
+    print("\nStep 4: Creating multimodal combinations...")
+    multimodal_datasets = create_multimodal_full_images(
+        thermal_data_combined, quality_masks, filtered_dates,
+        optical_grouped, sar_grouped
     )
 
-    print("\nStep 10: Saving ConvLSTM processed dataset...")
-    save_dir = "C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Outputs/Villoslada"
-    os.makedirs(save_dir, exist_ok=True)
-    np.save(os.path.join(save_dir, 'X_train_seq.npy'), X_train_seq)
-    np.save(os.path.join(save_dir, 'X_valid_seq.npy'), X_valid_seq)
-    np.save(os.path.join(save_dir, 'X_test_seq.npy'), X_test_seq)
-    np.save(os.path.join(save_dir, 'y_train_seq.npy'), y_train_seq)
-    np.save(os.path.join(save_dir, 'y_valid_seq.npy'), y_valid_seq)
-    np.save(os.path.join(save_dir, 'y_test_seq.npy'), y_test_seq)
-    print("Dataset saved for ConvLSTM")
+    print("\nStep 5: Creating windowed datasets for each combination...")
+    all_results = {}
 
-    return {
-        'cnn': (X_train, X_valid, X_test, y_train, y_valid, y_test),
-        'convlstm': (X_train_seq, X_valid_seq, X_test_seq, y_train_seq, y_valid_seq, y_test_seq)
-    }
+    for combo_name, (combined_data_list, combined_masks) in multimodal_datasets.items():
+        if len(combined_data_list) == 0:
+            print(f"Skipping {combo_name} - no data available")
+            continue
+
+        print(f"\nProcessing {combo_name} with {combined_data_list[0].shape[0]} channels...")
+
+        # Create windowed dataset for this combination
+        create_thermal_dataset(combined_data_list, combined_masks, mask_file,
+                               directory=f"./data_thermal_{combo_name}")
+
+        print(f"\nStep 6-{combo_name}: Loading windowed data...")
+        thermal_list, mask_list = load_thermal_data(f"./data_thermal_{combo_name}/thermal",
+                                                    f"./data_thermal_{combo_name}/mask")
+
+        print(f"\nStep 7-{combo_name}: Preprocessing data...")
+        # Determine target shape based on combination
+        channels = 2  # thermal base
+        if 'optical' in combo_name:
+            channels += 3
+        if 'sar' in combo_name:
+            channels += 2
+
+        target_shape = (64, 64, channels)
+
+        X, y = preprocess_thermal_data(thermal_list, mask_list, target_shape,
+                                       (64, 64, 1), f"./data_thermal_{combo_name}/thermal",
+                                       f"./data_thermal_{combo_name}/mask")
+
+        print(f"\nStep 8-{combo_name}: Splitting and normalizing data...")
+        X_train, X_valid, X_test, y_train, y_valid, y_test = train_test_split_custom(X, y)
+
+        # Normalize only thermal channels (first 2 channels)
+        X_train, X_valid, X_test = normalize_thermal_channels_only(X_train, X_valid, X_test)
+
+        print(f"\nStep 9-{combo_name}: Creating ConvLSTM sequences...")
+        X_train_seq, X_valid_seq, X_test_seq, y_train_seq, y_valid_seq, y_test_seq = create_time_sequences_from_patches(
+            X_train, X_valid, X_test, y_train, y_valid, y_test,
+            sequence_length=sequence_length, overlap=overlap
+        )
+
+        print(f"\nStep 10-{combo_name}: Saving datasets...")
+        save_dir = f"C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Outputs/Villoslada_{combo_name}"
+        os.makedirs(save_dir, exist_ok=True)
+
+        # Save CNN data
+        np.save(os.path.join(save_dir, 'X_train.npy'), X_train)
+        np.save(os.path.join(save_dir, 'X_valid.npy'), X_valid)
+        np.save(os.path.join(save_dir, 'X_test.npy'), X_test)
+        np.save(os.path.join(save_dir, 'y_train.npy'), y_train)
+        np.save(os.path.join(save_dir, 'y_valid.npy'), y_valid)
+        np.save(os.path.join(save_dir, 'y_test.npy'), y_test)
+
+        # Save ConvLSTM data
+        np.save(os.path.join(save_dir, 'X_train_seq.npy'), X_train_seq)
+        np.save(os.path.join(save_dir, 'X_valid_seq.npy'), X_valid_seq)
+        np.save(os.path.join(save_dir, 'X_test_seq.npy'), X_test_seq)
+        np.save(os.path.join(save_dir, 'y_train_seq.npy'), y_train_seq)
+        np.save(os.path.join(save_dir, 'y_valid_seq.npy'), y_valid_seq)
+        np.save(os.path.join(save_dir, 'y_test_seq.npy'), y_test_seq)
+
+        all_results[combo_name] = {
+            'cnn': (X_train, X_valid, X_test, y_train, y_valid, y_test),
+            'convlstm': (X_train_seq, X_valid_seq, X_test_seq, y_train_seq, y_valid_seq, y_test_seq)
+        }
+
+        print(f"✓ Saved {combo_name} dataset with {channels} channels")
+
+    print(f"\n🎉 Processing complete! Created {len(all_results)} dataset combinations.")
+    return all_results
 
 
 data = process_ecostress_thermal_data(
     data_dir=r"C:\Users\txiki\OneDrive\Documents\Studies\MSc_Geomatics\2Y\Thesis\Villoslada_full",
-    mask_file=r"C:\Users\txiki\OneDrive\Documents\Studies\MSc_Geomatics\2Y\Thesis\Masks\Villoslada masks\Geo_map_resized_Vill.tif",
+    mask_file=r"C:\Users\txiki\OneDrive\Documents\Studies\MSc_Geomatics\2Y\Thesis\Masks\Villoslada masks\Geo_map_resized_Santa.tif",
+    optical_dir=r"C:\Users\txiki\OneDrive\Documents\Studies\MSc_Geomatics\2Y\Thesis\RGB\Villoslada RGB",
+    sar_dir=r"C:\Users\txiki\OneDrive\Documents\Studies\MSc_Geomatics\2Y\Thesis\SAR\SAR Villoslada",
     sequence_length=5,
     overlap=2
 )
