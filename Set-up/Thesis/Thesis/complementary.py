@@ -47,7 +47,7 @@ def group_files_by_date(directory):
                     grouped_files[date] = {}
 
                 # More flexible file type detection
-                if '_LST_' in filename:
+                if '_LST_doy' in filename:
                     grouped_files[date]['lst'] = os.path.join(directory, filename)
                 elif 'EmisWB' in filename:
                     grouped_files[date]['emiswb'] = os.path.join(directory, filename)
@@ -856,10 +856,8 @@ def normalize_thermal_channels_only(X_train, X_valid, X_test):
     return X_train, X_valid, X_test
 
 
-def process_ecostress_thermal_data(data_dir, mask_file, optical_dir=None, sar_dir=None,
-                                   target_shape_thermal=(64, 64, 2),
-                                   target_shape_mask=(64, 64, 1), max_cloud_percentage=10,
-                                   max_bad_percentage=10, sequence_length=5, overlap=2):
+def process_ecostress_thermal_data(data_dir, mask_file, optical_dir=None, sar_dir=None, max_cloud_percentage=10,
+                                   max_bad_percentage=15, sequence_length=5, overlap=2):
     """
     Complete pipeline for processing ECOSTRESS thermal data.
 
@@ -957,7 +955,7 @@ def process_ecostress_thermal_data(data_dir, mask_file, optical_dir=None, sar_di
         )
 
         print(f"\nStep 10-{combo_name}: Saving datasets...")
-        save_dir = f"C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Outputs/Villoslada_{combo_name}"
+        save_dir = f"C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Outputs/Santa/Santa_{combo_name}"
         os.makedirs(save_dir, exist_ok=True)
 
         # Save CNN data
@@ -988,16 +986,21 @@ def process_ecostress_thermal_data(data_dir, mask_file, optical_dir=None, sar_di
 
 
 data = process_ecostress_thermal_data(
-    data_dir=r"C:\Users\txiki\OneDrive\Documents\Studies\MSc_Geomatics\2Y\Thesis\Villoslada_full",
-    mask_file=r"C:\Users\txiki\OneDrive\Documents\Studies\MSc_Geomatics\2Y\Thesis\Masks\Villoslada masks\Geo_map_resized_Santa.tif",
-    optical_dir=r"C:\Users\txiki\OneDrive\Documents\Studies\MSc_Geomatics\2Y\Thesis\RGB\Villoslada RGB",
-    sar_dir=r"C:\Users\txiki\OneDrive\Documents\Studies\MSc_Geomatics\2Y\Thesis\SAR\SAR Villoslada",
+    data_dir=r"C:\Users\txiki\OneDrive\Documents\Studies\MSc_Geomatics\2Y\Thesis\THERMAL\Santa_full",
+    mask_file=r"C:\Users\txiki\OneDrive\Documents\Studies\MSc_Geomatics\2Y\Thesis\Masks\Santa Olalla masks\Geo_map_resized_Santa.tif",
+    optical_dir=r"C:\Users\txiki\OneDrive\Documents\Studies\MSc_Geomatics\2Y\Thesis\RGB\Santa Olalla RGB",
+    sar_dir=r"C:\Users\txiki\OneDrive\Documents\Studies\MSc_Geomatics\2Y\Thesis\SAR\SAR Santa Olalla",
     sequence_length=5,
     overlap=2
 )
 
-cnn_data = data['cnn']
-convlstm_data = data['convlstm']
+for combo_name, combo_data in data.items():
+    print(f"Processing {combo_name}...")
+    cnn_data = combo_data['cnn']
+    convlstm_data = combo_data['convlstm']
 
-X_train, X_valid, X_test, y_train, y_valid, y_test = cnn_data
-X_train_seq, X_valid_seq, X_test_seq, y_train_seq, y_valid_seq, y_test_seq = convlstm_data
+    X_train, X_valid, X_test, y_train, y_valid, y_test = cnn_data
+    X_train_seq, X_valid_seq, X_test_seq, y_train_seq, y_valid_seq, y_test_seq = convlstm_data
+
+    print(f"CNN data shape: {X_train.shape}")
+    print(f"ConvLSTM data shape: {X_train_seq.shape}")
