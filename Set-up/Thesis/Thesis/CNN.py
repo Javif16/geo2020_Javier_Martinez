@@ -40,10 +40,10 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Conv2D, MaxPooling2D, Dense, Flatten, Dropout
 from tensorflow.keras.layers import Conv2DTranspose, concatenate, BatchNormalization
 from tensorflow.keras.regularizers import l2
-from sklearn.utils.class_weight import compute_class_weight
 from tensorflow.keras.initializers import HeNormal
 from tensorflow.keras.metrics import Precision, Recall, BinaryAccuracy, CategoricalAccuracy
 from tensorflow.keras.models import load_model
+from sklearn.utils.class_weight import compute_class_weight
 from sklearn.metrics import confusion_matrix, classification_report
 from sklearn.model_selection import KFold
 from sklearn.model_selection import train_test_split
@@ -54,73 +54,30 @@ from optuna.trial import TrialState
 import pickle
 from math import ceil
 from collections import defaultdict
-'''
-# -------------- LOADING DATA ------------------------------------------------------------------------------------------
-# get datasets already prepared from thermal.py + check for their shapes
-# thermal
-X_train = np.load("X_train.npy")
-X_val = np.load("X_val.npy")
-X_test = np.load("X_test.npy")
-# labels
-y_train = np.load("y_train.npy")
-y_val = np.load("y_val.npy")
-y_test = np.load("y_test.npy")
-# weights
-w_train = np.load("weights_train.npy")
-w_val = np.load("weights_val.npy")
-w_test = np.load("weights_test.npy")
-# dates
-dates_train = np.load("date_indices_train.npy")
-dates_val = np.load("date_indices_val.npy")
-dates_test = np.load("date_indices_test.npy")
 
-# ------------------------------------------------------------------------------
-# X = input data (samples, 744, 1171, 6), y = labels (), w = weights (samples, 744, 1171)
-# data has to be 'float32' for tensorflow computations
-X_train = X_train.astype('float32')
-X_val = X_val.astype('float32')
-X_test = X_test.astype('float32')
-# int - they are output
-y_train = y_train.astype('int32')
-y_val = y_val.astype('int32')
-y_test = y_test.astype('int32')
-# weights
-w_train = w_train.astype('float32')
-w_val = w_val.astype('float32')
-w_test = w_test.astype('float32')
-
-# channel decision
-use_lst_only = False
-use_emis_only = False
-if use_lst_only:
-    X_train = X_train[:, :, :, 0:1]
-    X_val = X_val[:, :, :, 0:1]
-    X_test = X_test[:, :, :, 0:1]
-    input_channels = 1
-    print("Using LST only (1 channel)")
-elif use_emis_only:
-    X_train = X_train[:, :, :, 1:0]
-    X_val = X_val[:, :, :, 1:0]
-    X_test = X_test[:, :, :, 1:0]
-    input_channels = 5
-else:
-    input_channels = 6
-    print("Using all channels")
-print(f"Final input shapes:")
-print(f"X_train: {X_train.shape}")
-print(f"y_train: {y_train.shape}")
-print(f"dates_train: {dates_train.shape}")
-print(f"Label range: {np.min(y_train)} to {np.max(y_train)}")
-'''
 
 # -------------- LOADING -----------------------------------------------------------------------------------------------
-data_path = "E:/Studies/Thesis/Code2/"
+data_path = 'E:/Studies/Thesis/THERMAL/Villoslada/Villoslada_thermal_winter/'
 X_train = np.load(data_path + 'X_train.npy')
 X_valid = np.load(data_path + 'X_valid.npy')
 X_test = np.load(data_path + 'X_test.npy')
 y_train = np.load(data_path + 'y_train.npy')
 y_valid = np.load(data_path + 'y_valid.npy')
 y_test = np.load(data_path + 'y_test.npy')
+
+# Cleaning for rgb and sar
+X_train[:, :, :, 2:7] = np.nan_to_num(X_train[:, :, :, 2:7], nan=0.0)
+X_valid[:, :, :, 2:7] = np.nan_to_num(X_valid[:, :, :, 2:7], nan=0.0)
+X_test[:, :, :, 2:7] = np.nan_to_num(X_test[:, :, :, 2:7], nan=0.0)
+for channel in range(X_train.shape[-1]):
+    channel_data = X_train[:, :, :, channel]
+    nan_count = np.isnan(channel_data).sum()
+    total = channel_data.size
+    print(f"Channel {channel}: {nan_count}/{total} NaN values ({nan_count/total*100:.2f}%)")
+
+#X_train = X_train[:, :, :, :2]
+#X_valid = X_valid[:, :, :, :2]
+#X_test = X_test[:, :, :, :2]
 
 print("Dataset loaded successfully!")
 print(f"X_train shape: {X_train.shape}")
@@ -253,33 +210,24 @@ def unet_model(size_input=(64, 64, 2), filters_base=16, classes=14, l2_reg=0.01)
 
 
 # -------------- LOSS FUNCTION ---------------------------------------------------------------------------------
-def combined_loss(class_weights, focal_alpha=0.25, focal_gamma=2.0, ce_weight=0.5):
-    """
-    Combines weighted categorical crossentropy with focal loss
-    """
-    class_weights_tensor = tf.constant(class_weights, dtype=tf.float32)
+def simple_weighted_loss(class_weights):
+    """Much simpler weighted loss function"""
 
     def loss_fn(y_true, y_pred):
-        y_true = tf.cast(y_true, tf.int32)
+        # Convert to sparse categorical crossentropy with class weights
+        y_true = tf.squeeze(y_true, axis=-1)  # [4,64,64,1] -> [4,64,64]
+        loss = tf.keras.losses.sparse_categorical_crossentropy(y_true, y_pred)
 
-        # Categorical crossentropy with class weights
-        ce_loss = tf.keras.losses.sparse_categorical_crossentropy(y_true, y_pred, from_logits=False)
-        weights = tf.gather(class_weights_tensor, y_true)
-        weighted_ce = tf.reduce_mean(ce_loss * weights)
+        # Apply class weights
+        sample_weights = tf.gather([
+            class_weights.get(0, 1.0), class_weights.get(1, 1.0), class_weights.get(2, 1.0),
+            class_weights.get(3, 1.0), class_weights.get(4, 1.0), class_weights.get(5, 1.0),
+            class_weights.get(6, 1.0), class_weights.get(7, 1.0), class_weights.get(8, 1.0),
+            class_weights.get(9, 1.0), class_weights.get(10, 1.0), class_weights.get(11, 1.0),
+            class_weights.get(12, 1.0), class_weights.get(13, 1.0)
+        ], tf.cast(y_true, tf.int32))
 
-        # Focal loss component
-        y_pred_softmax = tf.nn.softmax(y_pred, axis=-1)
-        y_pred_softmax = tf.clip_by_value(y_pred_softmax, 1e-8, 1.0 - 1e-8)
-        y_true_one_hot = tf.one_hot(y_true, depth=14)
-
-        ce_focal = -y_true_one_hot * tf.math.log(y_pred_softmax)
-        p_t = tf.reduce_sum(y_true_one_hot * y_pred_softmax, axis=-1)
-        focal_weight = focal_alpha * tf.pow(1 - p_t, focal_gamma)
-        focal_loss = tf.reduce_mean(focal_weight * tf.reduce_sum(ce_focal, axis=-1))
-
-        # Combine losses
-        total_loss = ce_weight * weighted_ce + (1 - ce_weight) * focal_loss
-        return total_loss
+        return tf.reduce_mean(loss * sample_weights)
 
     return loss_fn
 
@@ -400,7 +348,7 @@ class EpochTracker(tf.keras.callbacks.Callback):
 
 
 # -------------- TRAINING & EVALUATION ---------------------------------------------------------------------------------
-def train_model(X_train, y_train, X_val, y_val, X_test, y_test, use_optuna=True, n_trials=30, epochs=30):
+def train_model(X_train, y_train, X_val, y_val, X_test, y_test, use_optuna=True, n_trials=30, epochs=100):
     """
     Train and evaluate model with optional Optuna hyperparameter optimization
     Enhanced to track predictions at each epoch for visualization
@@ -416,16 +364,16 @@ def train_model(X_train, y_train, X_val, y_val, X_test, y_test, use_optuna=True,
             tf.keras.backend.clear_session()
 
             # Suggest hyperparameters
-            learning_rate = trial.suggest_float('learning_rate', 1e-5, 1e-3, log=True)
-            batch_size = trial.suggest_categorical('batch_size', [2, 4])
-            dropout_rate = trial.suggest_float('dropout_rate', 0.1, 0.5)
-            l2_reg = trial.suggest_float('l2_regularization', 0.001, 0.01, 0.1, log=True)
+            learning_rate = trial.suggest_float('learning_rate', 1e-5, 1e-3)
+            batch_size = trial.suggest_categorical('batch_size', [4, 16, 32])
+            dropout_rate = trial.suggest_float('dropout_rate', 0.1, 0.2)
+            l2_reg = trial.suggest_categorical('l2_reg', [0.001, 0.01, 0.1])
             filters_base = trial.suggest_categorical('filters_base', [16, 32, 64])
 
             try:
                 # Create model with suggested hyperparameters
                 model = unet_model(
-                    size_input=(64, 64, 2),
+                    size_input=(64, 64, 5),
                     classes=14,
                     l2_reg=l2_reg,
                     filters_base=filters_base)
@@ -450,7 +398,7 @@ def train_model(X_train, y_train, X_val, y_val, X_test, y_test, use_optuna=True,
                 history = model.fit(
                     X_train, y_train,
                     validation_data=(X_val, y_val),
-                    epochs=5,
+                    epochs=100,
                     batch_size=batch_size,
                     callbacks=[early_stopping, pruning_callback],
                     verbose=0
@@ -473,8 +421,8 @@ def train_model(X_train, y_train, X_val, y_val, X_test, y_test, use_optuna=True,
     else:
         # Use default parameters
         best_params = {
-            'learning_rate': 0.00001,
-            'l2_reg': 0.1,
+            'learning_rate': 0.0001,
+            'l2_reg': 0.05,
             'batch_size': 4,
             'filters_base': 16
         }
@@ -498,19 +446,28 @@ def train_model(X_train, y_train, X_val, y_val, X_test, y_test, use_optuna=True,
 
     class_weights = {
         0: 1.0,  # NaNs (background)
-        1: 50.0,  # Sand - heavily underrepresented
-        2: 40.0,  # Clay
-        4: 100.0,  # Silt - very rare
-        5: 200.0,  # Peat - extremely rare
-        7: 1.0,  # Detritic - dominant class
-        8: 5.0,  # Carbonate
-        9: 500.0,  # Volcanic - almost extinct
-        10: 500.0  # Plutonic - almost extinct
+        1: 4.0,  # Sand
+        2: 4.0,  # Clay
+        3: 1.0,  # Chalk
+        4: 1.5, # Silt - keep high
+        5: 1.0,  # Peat
+        6: 2.0,  # Loam
+        7: 0.5,  # Detritic
+        8: 1.25,  # Carbonate
+        9: 2.0,  # Volcanic
+        10: 1.0,  # Plutonic
+        11: 0.5,  # Foliated
+        12: 0.75, # Non-Foliated
+        13: 1.0  # Water
     }
+    # Puertollano - 1, 2, 4, 6, 7, 8, 9, 11, 12
+    # Santa Olalla - 1, 3, 4, 7, 8, 9, 10, 11, 12
+    # Villoslada - 1, 2, 4, 5, 7, 8
 
     # Compile with optimized parameters
     optimizer = tf.keras.optimizers.Adam(learning_rate=best_params['learning_rate'])
     loss = tf.keras.losses.SparseCategoricalCrossentropy()
+    # loss = simple_weighted_loss(class_weights)
 
     model.compile(
         optimizer=optimizer,
@@ -525,7 +482,7 @@ def train_model(X_train, y_train, X_val, y_val, X_test, y_test, use_optuna=True,
     lr_callback = tf.keras.callbacks.ReduceLROnPlateau(
         monitor='val_loss',
         factor=0.5,
-        patience=3,
+        patience=7,
         min_lr=1e-7,
         verbose=1
     )
@@ -628,6 +585,16 @@ def compute_metrics(y_true, y_pred, class_names=None, print_results=True):
         if print_results:
             print(f"{class_name} (ID: {class_id}): IoU = {iou:.4f} | TP={tp}, FP={fp}, FN={fn}")
 
+    # Calculate F1 scores
+    # Macro F1 (average of per-class F1 scores)
+    f1_macro = f1_score(y_true_flat, y_pred_flat, labels=unique_classes, average='macro')
+
+    # Weighted F1 (weighted by support)
+    f1_weighted = f1_score(y_true_flat, y_pred_flat, labels=unique_classes, average='weighted')
+
+    # Per-class F1 scores
+    f1_per_class = f1_score(y_true_flat, y_pred_flat, labels=unique_classes, average=None)
+
     # Calculate mean IoU (excluding background class 0 if present)
     if 0 in unique_classes and len(unique_classes) > 1:
         # Exclude background class from mean IoU calculation
@@ -646,6 +613,12 @@ def compute_metrics(y_true, y_pred, class_names=None, print_results=True):
         print(f"Accuracy: {accuracy:.4f}")
         print(f"Mean IoU (excluding background): {mean_iou:.4f}")
         print(f"Mean IoU (all classes): {mean_iou_all:.4f}")
+        print(f"F1 Score (Macro): {f1_macro:.4f}")
+        print(f"F1 Score (Weighted): {f1_weighted:.4f}")
+        print(f"\nPer-class F1 scores:")
+        for i, class_id in enumerate(unique_classes):
+            class_name = class_names[class_id] if class_names else f"Class_{class_id}"
+            print(f"{class_name}: {f1_per_class[i]:.4f}")
         print("-" * 50)
 
     return {
@@ -654,30 +627,86 @@ def compute_metrics(y_true, y_pred, class_names=None, print_results=True):
         'mean_iou_all': mean_iou_all,
         'per_class_iou': per_class_iou,
         'iou_scores': iou_scores,
-        'unique_classes': unique_classes
+        'unique_classes': unique_classes,
+        'f1_macro': f1_macro,
+        'f1_weighted': f1_weighted,
+        'f1_per_class': f1_per_class
     }
+
+from tensorflow.keras import backend as K
+def f1_score_keras(y_true, y_pred):
+    """
+    F1 score metric for Keras - works with multi-class segmentation
+    """
+
+    def recall_m(y_true, y_pred):
+        true_positives = K.sum(K.round(K.clip(y_true * y_pred, 0, 1)))
+        possible_positives = K.sum(K.round(K.clip(y_true, 0, 1)))
+        recall = true_positives / (possible_positives + K.epsilon())
+        return recall
+
+    def precision_m(y_true, y_pred):
+        true_positives = K.sum(K.round(K.clip(y_true * y_pred, 0, 1)))
+        predicted_positives = K.sum(K.round(K.clip(y_pred, 0, 1)))
+        precision = true_positives / (predicted_positives + K.epsilon())
+        return precision
+
+    precision = precision_m(y_true, y_pred)
+    recall = recall_m(y_true, y_pred)
+    return 2 * ((precision * recall) / (precision + recall + K.epsilon()))
 
 
 def plot_training(history):
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    """
+    Enhanced plotting function that includes F1 score if available
+    """
+    # Check what metrics are available in history
+    available_metrics = list(history.history.keys())
+    has_f1 = any('f1' in metric.lower() for metric in available_metrics)
 
-    # loss
+    # Determine number of subplots based on available metrics
+    if has_f1:
+        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    else:
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+    # Plot 1: Loss
     axes[0].plot(history.history['loss'], label='Training Loss')
-    axes[0].plot(history.history['val_loss'], label='Validation Loss')
+    if 'val_loss' in history.history:
+        axes[0].plot(history.history['val_loss'], label='Validation Loss')
     axes[0].set_title('Model Loss')
     axes[0].set_xlabel('Epoch')
     axes[0].set_ylabel('Loss')
     axes[0].legend()
     axes[0].grid(True)
 
-    # accuracy
+    # Plot 2: Accuracy
     axes[1].plot(history.history['accuracy'], label='Training Accuracy')
-    axes[1].plot(history.history['val_accuracy'], label='Validation Accuracy')
+    if 'val_accuracy' in history.history:
+        axes[1].plot(history.history['val_accuracy'], label='Validation Accuracy')
     axes[1].set_title('Model Accuracy')
     axes[1].set_xlabel('Epoch')
     axes[1].set_ylabel('Accuracy')
     axes[1].legend()
     axes[1].grid(True)
+
+    # Plot 3: F1 Score
+    if has_f1:
+        f1_keys = [key for key in available_metrics if 'f1' in key.lower() and not key.startswith('val_')]
+        val_f1_keys = [key for key in available_metrics if 'f1' in key.lower() and key.startswith('val_')]
+
+        for f1_key in f1_keys:
+            axes[2].plot(history.history[f1_key], label=f'Training {f1_key.replace("_", " ").title()}')
+
+        for val_f1_key in val_f1_keys:
+            axes[2].plot(history.history[val_f1_key],
+                         label=f'Validation {val_f1_key.replace("val_", "").replace("_", " ").title()}')
+
+        axes[2].set_title('Model F1 Score')
+        axes[2].set_xlabel('Epoch')
+        axes[2].set_ylabel('F1 Score')
+        axes[2].legend()
+        axes[2].grid(True)
 
     plt.tight_layout()
     plt.show()
@@ -762,30 +791,24 @@ def visualize_cnn_results(X_test, y_test, predictions, num_patches=3, patch_indi
 
     plt.show()
 
-    # Print accuracy for visualized patches
-    print(f"\nAccuracy for visualized patches:")
+    # Print accuracy and F1 for visualized patches
+    print(f"\nMetrics for visualized patches:")
     for i, patch_idx in enumerate(patch_indices):
-        true_labels = y_test[patch_idx].squeeze()
-        pred_labels = predictions[patch_idx]
+        true_labels = y_test[patch_idx].squeeze().flatten()
+        pred_labels = predictions[patch_idx].flatten()
         accuracy = np.mean(true_labels == pred_labels)
-        print(f"Patch {patch_idx + 1}: {accuracy:.4f}")
+        f1_macro = f1_score(true_labels, pred_labels, average='macro')
+        print(f"Patch {patch_idx + 1}: Accuracy = {accuracy:.4f}, F1 (macro) = {f1_macro:.4f}")
 
 
 # -------------- WORKFLOW ----------------------------------------------------------------------------------------------
-'''
-fold_results = k_fold_cross_validation(
-    X_train,
-    y_train,
-    w_train
-)
-'''
 
 (model, history, predictions, best_params,
  epoch_predictions, epoch_metrics, all_epoch_metrics) = train_model(
     X_train, y_train,
     X_valid, y_valid,
     X_test, y_test,
-    use_optuna=False, n_trials=5, epochs=10)
+    use_optuna=False, n_trials=15, epochs=100)
 
 class_names = [
     "NaNs",      # Class 0
@@ -822,7 +845,37 @@ for param_name, param_value in best_params.items():
 
 plot_training(history)
 
-visualize_cnn_results(X_test, y_test, predictions, figsize=(18, 10), patch_indices=[211, 502, 900])
+visualize_cnn_results(X_test, y_test, predictions, figsize=(18, 10), patch_indices=[77, 134, 456])
+'''
+Maximum patch index:
+    Villoslada:
+        · thermal only - 900
+        · thermal_optical - 76
+        · thermal_sar - 263
+        · all - 36
+        · thermal_day - 864
+        · thermal_night - 249
+        · thermal_winter - 501
+        · thermal_summer - 612
+    Santa:
+        · thermal only - 60
+        · thermal_optical - 23
+        · thermal_sar - 60
+        · all - 5
+        · thermal_day - 175
+        · thermal_night - 81
+        · thermal_winter - 111
+        · thermal_summer - 145
+    Puertollano:
+        · thermal only - 360
+        · thermal_optical - 40
+        · thermal_sar - 173
+        · all - 18
+        · thermal_day - 202
+        · thermal_night - 159
+        · thermal_winter - 173
+        · thermal_summer - 187
+'''
 
 
 model.save(os.path.join('models', 'CNN_categorical.keras'))  # Native Keras format

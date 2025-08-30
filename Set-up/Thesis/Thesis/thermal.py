@@ -8,6 +8,7 @@ import re
 
 import pandas as pd
 
+
 def interpolate_nans(values):
     """
     Interpolate NaNs in a list or array using linear interpolation.
@@ -174,7 +175,8 @@ class ThermalSignatureAnalyzer:
             return None
 
         dates = sorted(self.thermal_data.keys())
-        classes = [c for c in range(1, 14) if c != 0]  # Exclude NaN values (class 0)
+        # classes = [c for c in range(1, 14) if c != 0]  # Exclude NaN values (class 0)
+        classes = [1, 2]
 
         # Initialize results dictionary
         results = {cls: [] for cls in classes}
@@ -370,8 +372,8 @@ class ThermalSignatureAnalyzer:
 # Example usage
 if __name__ == "__main__":
     # Initialize analyzer
-    geo_map_path = r"C:\Users\txiki\OneDrive\Documents\Studies\MSc_Geomatics\2Y\Thesis\Masks\Geo_map_resized_Santa.tif"
-    thermal_images_dir = r"C:\Users\txiki\OneDrive\Documents\Studies\MSc_Geomatics\2Y\Thesis\Santa_full"
+    geo_map_path = r"C:\Users\txiki\OneDrive\Documents\Studies\MSc_Geomatics\2Y\Thesis\Masks\Santa Olalla masks\Geo_map_resized_Santa.tif"
+    thermal_images_dir = r"C:\Users\txiki\OneDrive\Documents\Studies\MSc_Geomatics\2Y\Thesis\THERMAL\Santa_full"
 
     analyzer = ThermalSignatureAnalyzer(geo_map_path, thermal_images_dir)
 

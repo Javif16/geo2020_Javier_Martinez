@@ -19,7 +19,7 @@ import random
 import tensorflow as tf
 from tensorflow.keras import backend
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Conv2D, Conv3D, MaxPooling2D, MaxPooling3D, Dense, Flatten, Dropout
+from tensorflow.keras.layers import Conv2D, Conv3D, MaxPooling2D, MaxPooling3D, Dense, Flatten, Dropout, SpatialDropout3D
 from tensorflow.keras.layers import Conv2DTranspose, concatenate, BatchNormalization
 from tensorflow.keras.layers import ConvLSTM2D, TimeDistributed, UpSampling2D, UpSampling3D
 from tensorflow.keras.regularizers import l2
@@ -38,16 +38,27 @@ from collections import defaultdict
 
 
 # -------------- LOADING DATA ------------------------------------------------------------------------------------------
-data_path = "E:/Studies/Thesis/Code2/"
-# data_path_optical = "C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Outputs/Villoslada/convlstm"
-# data_path_sar = "C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Outputs/Villoslada/convlstm"
-# data_path_all = "C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Outputs/Villoslada/convlstm"
+data_path = 'E:/Studies/Thesis/THERMAL/Villoslada/Villoslada_thermal_sar/'
 X_train = np.load(data_path + 'X_train_seq.npy')
 X_valid = np.load(data_path + 'X_valid_seq.npy')
 X_test = np.load(data_path + 'X_test_seq.npy')
 y_train = np.load(data_path + 'y_train_seq.npy')
 y_valid = np.load(data_path + 'y_valid_seq.npy')
 y_test = np.load(data_path + 'y_test_seq.npy')
+
+# Cleaning for rgb and sar
+X_train[:, :, :, :, 2:7] = np.nan_to_num(X_train[:, :, :, :, 2:7], nan=0.0)
+X_valid[:, :, :, :, 2:7] = np.nan_to_num(X_valid[:, :, :, :, 2:7], nan=0.0)
+X_test[:, :, :, :, 2:7] = np.nan_to_num(X_test[:, :, :, :, 2:7], nan=0.0)
+for channel in range(X_train.shape[-1]):
+    channel_data = X_train[:, :, :, channel]
+    nan_count = np.isnan(channel_data).sum()
+    total = channel_data.size
+    print(f"Channel {channel}: {nan_count}/{total} NaN values ({nan_count/total*100:.2f}%)")
+
+#X_train = X_train[:, :, :, :, :2]
+#X_valid = X_valid[:, :, :, :, :2]
+#X_test = X_test[:, :, :, :, :2]
 
 print("Dataset loaded successfully!")
 print(f"X_train shape: {X_train.shape}")
@@ -64,14 +75,17 @@ def clstm_unet_model(size_input=(5, 64, 64, 2), filters_base=16, classes=14, l2_
         convolution = ConvLSTM2D(filters, (3, 3), activation='relu', padding='same', kernel_initializer='he_normal',
                              kernel_regularizer=l2(l2factor), return_sequences=True)(inputs)
         convo = BatchNormalization()(convolution)
-        if dropout > 0:
-            convo = Dropout(dropout)(convo)
-        if max_pooling:
-            next_layer = MaxPooling3D(pool_size=(1, 2, 2))(convo)
-        else:
-            next_layer = convo
 
-        skip_connection = convo
+        convolution2 = ConvLSTM2D(filters, (3, 3), activation='relu', padding='same', kernel_initializer='he_normal',
+            kernel_regularizer=l2(l2factor), return_sequences=True)(convo)
+        convo2 = BatchNormalization()(convolution2)
+        if dropout > 0:
+            convo2 = SpatialDropout3D(dropout)(convo2)
+        if max_pooling:
+            next_layer = MaxPooling3D(pool_size=(1, 2, 2))(convo2)
+        else:
+            next_layer = convo2
+        skip_connection = convo2
 
         return next_layer, skip_connection
 
@@ -96,15 +110,15 @@ def clstm_unet_model(size_input=(5, 64, 64, 2), filters_base=16, classes=14, l2_
     inputs = tf.keras.layers.Input(shape=size_input)
 
     # encoder
-    conv1, skip1 = Encoder(inputs, filters_base, dropout=0, l2factor=l2_reg, max_pooling=True)  # 372 x 585
-    conv2, skip2 = Encoder(conv1, filters_base * 2, dropout=0, l2factor=l2_reg, max_pooling=True)  # 186 x 292
+    conv1, skip1 = Encoder(inputs, filters_base, dropout=0.0, l2factor=l2_reg, max_pooling=True)  # 372 x 585
+    conv2, skip2 = Encoder(conv1, filters_base * 2, dropout=0.0, l2factor=l2_reg, max_pooling=True)  # 186 x 292
     conv3, skip3 = Encoder(conv2, filters_base * 4, dropout=0.1, l2factor=l2_reg, max_pooling=True)  # 93 x 146
-    conv4, skip4 = Encoder(conv3, filters_base * 8, dropout=0.2, l2factor=l2_reg, max_pooling=True)  # 46 x 73
+    conv4, skip4 = Encoder(conv3, filters_base * 8, dropout=0.15, l2factor=l2_reg, max_pooling=True)  # 46 x 73
     conv5, skip5 = Encoder(conv4, filters_base * 16, dropout=0.2, l2factor=l2_reg, max_pooling=True)  # 23 x 36
 
     # bottleneck (last layer before upscaling)
     bottleneck = ConvLSTM2D(filters_base * 32, (3, 3), activation='relu', padding='same',
-                            kernel_initializer='he_normal', kernel_regularizer=l2(l2_reg * 2),
+                            kernel_initializer='he_normal', dropout=0.3, kernel_regularizer=l2(l2_reg),
                             return_sequences=False)(conv5)    # maxpooling in last convolution as upscaling starts here
 
     # decoder with reducing filters with skip connections from encoder given as input
@@ -210,6 +224,29 @@ class EpochTracker(tf.keras.callbacks.Callback):
         gc.collect()
 
 
+# -------------- LOSS FUNCTION -----------------------------------------------------------------------------------------
+def simple_weighted_loss(class_weights):
+    """Much simpler weighted loss function"""
+
+    def loss_fn(y_true, y_pred):
+        # Convert to sparse categorical crossentropy with class weights
+        y_true = tf.squeeze(y_true, axis=-1)  # [4,64,64,1] -> [4,64,64]
+        loss = tf.keras.losses.sparse_categorical_crossentropy(y_true, y_pred)
+
+        # Apply class weights
+        sample_weights = tf.gather([
+            class_weights.get(0, 1.0), class_weights.get(1, 1.0), class_weights.get(2, 1.0),
+            class_weights.get(3, 1.0), class_weights.get(4, 1.0), class_weights.get(5, 1.0),
+            class_weights.get(6, 1.0), class_weights.get(7, 1.0), class_weights.get(8, 1.0),
+            class_weights.get(9, 1.0), class_weights.get(10, 1.0), class_weights.get(11, 1.0),
+            class_weights.get(12, 1.0), class_weights.get(13, 1.0)
+        ], tf.cast(y_true, tf.int32))
+
+        return tf.reduce_mean(loss * sample_weights)
+
+    return loss_fn
+
+
 # -------------- TRAINING ----------------------------------------------------------------------------------------------
 def train_evaluate_model(X_train, y_train, X_val, y_val, X_test, y_test, use_optuna=True, n_trials=30, epochs=30):
     """
@@ -308,9 +345,9 @@ def train_evaluate_model(X_train, y_train, X_val, y_val, X_test, y_test, use_opt
     else:
         # Use default parameters
         best_params = {
-            'learning_rate': 0.0001,
-            'l2factor': 0.1,
-            'batch_size': 8,
+            'learning_rate': 0.00001,
+            'l2factor': 0.05,
+            'batch_size': 4,
             'filters_base': 16
         }
         print("=== USING DEFAULT PARAMETERS (NO OPTUNA) ===")
@@ -328,13 +365,34 @@ def train_evaluate_model(X_train, y_train, X_val, y_val, X_test, y_test, use_opt
 
     print("Model output shape:", model.output_shape)
 
-    optimizer = tf.keras.optimizers.Adam(learning_rate=best_params['learning_rate'])
+    class_weights = {
+        0: 1.0,  # NaNs (background)
+        1: 3.0,  # Sand
+        2: 3.0,  # Clay
+        3: 1.0,  # Chalk
+        4: 2.0,  # Silt - keep high
+        5: 1.0,  # Peat
+        6: 2.0,  # Loam
+        7: 1.0,  # Detritic
+        8: 2.0,  # Carbonate
+        9: 3.0,  # Volcanic
+        10: 1.0,  # Plutonic
+        11: 1.0,  # Foliated
+        12: 1.0,  # Non-Foliated
+        13: 1.0  # Water
+    }
+    # Puertollano - 1, 2, 4, 6, 7, 8, 9, 11, 12
+    # Santa Olalla - 1, 3, 4, 7, 8, 9, 10, 11, 12
+    # Villoslada - 1, 2, 4, 5, 7, 8
+
+    optimizer = tf.keras.optimizers.AdamW(learning_rate=best_params['learning_rate'], clipnorm=1.0)
     loss = tf.keras.losses.SparseCategoricalCrossentropy()
+    # loss = simple_weighted_loss(class_weights)
 
     model.compile(
         optimizer=optimizer,
         loss=loss,
-        metrics=['accuracy', tf.keras.metrics.SparseCategoricalAccuracy()]
+        metrics=['accuracy', tf.keras.metrics.SparseCategoricalAccuracy(), f1_score_keras]
     )
 
     # Initialize the callback
@@ -344,13 +402,13 @@ def train_evaluate_model(X_train, y_train, X_val, y_val, X_test, y_test, use_opt
     lr_callback = tf.keras.callbacks.ReduceLROnPlateau(
         monitor='val_loss',
         factor=0.5,
-        patience=8,
-        min_lr=1e-5,
+        patience=5,
+        min_lr=1e-7,
         verbose=1
     )
     early_stopping = tf.keras.callbacks.EarlyStopping(
         monitor='val_loss',
-        patience=10,
+        patience=15,
         restore_best_weights=True
     )
 
@@ -367,10 +425,11 @@ def train_evaluate_model(X_train, y_train, X_val, y_val, X_test, y_test, use_opt
 
     # Evaluation
     print("\n=== FINAL EVALUATION ===")
-    test_loss, test_acc, test_sparse_acc = model.evaluate(X_test, y_test, batch_size=4, verbose=0)
-    print(f"Test loss: {test_loss}")
-    print(f"Test Accuracy: {test_acc}")
-    print(f"Test Sparse Categorical Accuracy: {test_sparse_acc:.4f}")
+    evaluation_results = model.evaluate(X_test, y_test, batch_size=4, verbose=0)
+    result_names = ['Loss', 'Accuracy', 'Sparse Categorical Accuracy', 'F1 Score']
+    for i, value in enumerate(evaluation_results):
+        name = result_names[i] if i < len(result_names) else f'Metric_{i}'
+        print(f"Test {name}: {value:.4f}")
 
     print("Computing final predictions...")
     predictions_list = []
@@ -449,69 +508,82 @@ def compute_metrics(y_true, y_pred):
     return metrics
 
 
-'''
-# K-Fold Cross Validation Loop
-def k_fold_cross_validation(model_func, X_train, y_train, k=5):
-    kf = KFold(n_splits=k, shuffle=True, random_state=42)
-    X_train = X_train.reshape(-1, 4, 4, 7)
-    y_train = y_train.reshape(-1, 4, 4, 7)
-    fold_results = {'accuracy': [], 'precision': [], 'recall': [], 'f1_score': [], 'iou': []}
+from tensorflow.keras import backend as K
 
-    for fold, (train_idx, val_idx) in enumerate(kf.split(X_train)):
-        print(f"\nFold {fold + 1}/{k}")
+def f1_score_keras(y_true, y_pred):
+    """
+    F1 score metric for Keras - works with multi-class segmentation
+    """
+    # Convert predictions to class indices
+    y_pred_classes = K.argmax(y_pred, axis=-1)
 
-        X_train_fold, X_val_fold = X_train[train_idx], X_train[val_idx]
-        y_train_fold, y_val_fold = y_train[train_idx], y_train[val_idx]
+    # Cast to same type
+    y_true = K.cast(K.flatten(y_true), tf.float32)
+    y_pred_classes = K.cast(K.flatten(y_pred_classes), tf.float32)
 
-        model = model_func()
-        model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+    # Calculate overall precision and recall (micro-average)
+    true_positives = K.sum(K.cast(K.equal(y_true, y_pred_classes), tf.float32))
+    total_samples = K.cast(K.shape(y_true)[0], tf.float32)
 
-        history = model.fit(
-            X_train_fold, y_train_fold,
-            validation_data=(X_val_fold, y_val_fold),
-            batch_size=4, epochs=30, verbose=1, callbacks=callbacks
-        )
+    # This gives us accuracy, which for multiclass can serve as a proxy
+    accuracy = true_positives / total_samples
 
-        evaluate_loss(history)
-
-        y_pred_fold = model.predict(X_val_fold)
-        precision, recall, accuracy, f1_score, iou, _ = compute_metrics(y_val_fold, y_pred_fold)
-
-        fold_results['accuracy'].append(accuracy)
-        fold_results['precision'].append(precision)
-        fold_results['recall'].append(recall)
-        fold_results['f1_score'].append(f1_score)
-        fold_results['iou'].append(iou)
-
-    print("\nCross-Validation Results:")
-    for metric, values in fold_results.items():
-        print(f"Mean {metric.capitalize()}: {np.mean(values):.4f}")
-
-    return fold_results
-'''
+    # For multiclass, we'll return accuracy as F1 approximation
+    return accuracy
 
 
 # -------------- EVALUATION --------------------------------------------------------------------------------------------
 def plot_training(history):
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    """
+    Enhanced plotting function that includes F1 score if available
+    """
+    # Check what metrics are available in history
+    available_metrics = list(history.history.keys())
+    has_f1 = any('f1' in metric.lower() for metric in available_metrics)
 
-    # loss
+    # Determine number of subplots based on available metrics
+    if has_f1:
+        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    else:
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+    # Plot 1: Loss
     axes[0].plot(history.history['loss'], label='Training Loss')
-    axes[0].plot(history.history['val_loss'], label='Validation Loss')
+    if 'val_loss' in history.history:
+        axes[0].plot(history.history['val_loss'], label='Validation Loss')
     axes[0].set_title('Model Loss')
     axes[0].set_xlabel('Epoch')
     axes[0].set_ylabel('Loss')
     axes[0].legend()
     axes[0].grid(True)
 
-    # accuracy
+    # Plot 2: Accuracy
     axes[1].plot(history.history['accuracy'], label='Training Accuracy')
-    axes[1].plot(history.history['val_accuracy'], label='Validation Accuracy')
+    if 'val_accuracy' in history.history:
+        axes[1].plot(history.history['val_accuracy'], label='Validation Accuracy')
     axes[1].set_title('Model Accuracy')
     axes[1].set_xlabel('Epoch')
     axes[1].set_ylabel('Accuracy')
     axes[1].legend()
     axes[1].grid(True)
+
+    # Plot 3: F1 Score
+    if has_f1:
+        f1_keys = [key for key in available_metrics if 'f1' in key.lower() and not key.startswith('val_')]
+        val_f1_keys = [key for key in available_metrics if 'f1' in key.lower() and key.startswith('val_')]
+
+        for f1_key in f1_keys:
+            axes[2].plot(history.history[f1_key], label=f'Training {f1_key.replace("_", " ").title()}')
+
+        for val_f1_key in val_f1_keys:
+            axes[2].plot(history.history[val_f1_key],
+                         label=f'Validation {val_f1_key.replace("val_", "").replace("_", " ").title()}')
+
+        axes[2].set_title('Model F1 Score')
+        axes[2].set_xlabel('Epoch')
+        axes[2].set_ylabel('F1 Score')
+        axes[2].legend()
+        axes[2].grid(True)
 
     plt.tight_layout()
     plt.show()
@@ -638,9 +710,40 @@ for param_name, param_value in best_params.items():
     print(f"{param_name}: {param_value}")
 
 visualize_convlstm_results(
-    X_test, y_test, predictions, patch_indices=[50, 167, 332], timestep_to_visualize=-1)
+    X_test, y_test, predictions, patch_indices=[5, 10, 11], timestep_to_visualize=-1)
 
 plot_training(history)
+
+'''
+Maximum patch index:
+    Villoslada:
+        · thermal only - 
+        · thermal_optical - 65
+        · thermal_sar - 13
+        · all - 10
+        · thermal_day - 82
+        · thermal_night - 277
+        · thermal_winter - 165
+        · thermal_summer - 198
+    Santa:
+        · thermal only - 83
+        · thermal_optical - 7
+        · thermal_sar - 15
+        · all - 1 
+        · thermal_day - 57
+        · thermal_night - 26
+        · thermal_winter - 35
+        · thermal_summer - 46
+    Puertollano:
+        · thermal only - 63
+        · thermal_optical - 6
+        · thermal_sar - 25
+        · all - 1
+        · thermal_day - 118
+        · thermal_night - 52
+        · thermal_winter - 56
+        · thermal_summer - 55
+'''
 
 # ---------------- SAVING ----------------------------------------------------------------------------------------------
 model.save(os.path.join('models', 'ConvLSTM.keras'))
