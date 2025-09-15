@@ -1,3 +1,8 @@
+'''
+This file extracts and prepares RGB files from Landsat for the main pre-processing stage in complementary.py, where the
+data will be combined with thermal patches for preparation.
+'''
+
 import os
 import rasterio
 import numpy as np
@@ -10,40 +15,37 @@ CLOUD_BIT = 1 << 3
 CLOUD_CONF_MASK = 0b11 << 8
 CLOUD_CONF_HIGH = 0b11 << 8
 
-# Paths
+# Input and output folders
 thermal_path = r'E:/Studies/Thesis/ECO_example_Villoslada.tif'
 optical_folder = r'E:/Studies/Thesis/RGB/Villoslada RGB raw'
 output_folder = r'E:/Studies/Thesis/RGB/Villoslada RGB'
 os.makedirs(output_folder, exist_ok=True)
 
 
-# Read thermal extent and shape
+# Thermal extent and shape
 with rasterio.open(thermal_path) as thermal_src:
     thermal_bounds = thermal_src.bounds
     thermal_crs = thermal_src.crs
     thermal_shape = (thermal_src.height, thermal_src.width)
 
-# Group RGB files by base ID (excluding QA)
 image_groups = {}
 for fname in os.listdir(optical_folder):
     if "_SR_B2" in fname or "_SR_B3" in fname or "_SR_B4" in fname:
         base_id = fname.split("_SR_B")[0]
         image_groups.setdefault(base_id, []).append(fname)
 
-# Process each group (B2, B3, B4)
+# B2, B3, B4
 for base_id, band_files in image_groups.items():
     if len(band_files) < 3:
         print(f"⚠️ Skipping {base_id}: missing one or more RGB bands")
         continue
 
-    # Look for corresponding QA_PIXEL
     qa_name = base_id + "_QA_PIXEL.TIF"
     qa_path = os.path.join(optical_folder, qa_name)
     if not os.path.exists(qa_path):
         print(f"⚠️ Skipping {base_id}: QA_PIXEL not found")
         continue
 
-    # Open QA_PIXEL and crop+resize to thermal extent
     with rasterio.open(qa_path) as qa_src:
         if qa_src.crs != thermal_crs:
             print(f"⚠️ Skipping {base_id}: CRS mismatch in QA_PIXEL")
@@ -51,7 +53,7 @@ for base_id, band_files in image_groups.items():
         try:
             qa_window = from_bounds(*thermal_bounds, transform=qa_src.transform)
         except ValueError:
-            print(f"❌ Failed windowing QA_PIXEL for {base_id}, skipping")
+            print(f"Failed windowing QA_PIXEL for {base_id}, skipping")
             continue
 
         qa_crop = qa_src.read(1, window=qa_window, boundless=True)
@@ -72,11 +74,11 @@ for base_id, band_files in image_groups.items():
         cloud_pct = (cloud_pixels / total_pixels) * 100
 
         if cloud_pct > 10:
-            print(f"⛔ Skipping {base_id}, Cloud={cloud_pct:.2f}%")
+            print(f"Skipping {base_id}, Cloud={cloud_pct:.2f}%")
             continue
 
-    # Load, crop, resize, normalize RGB bands
-    bands_sorted = sorted(band_files)  # Ensures B2, B3, B4 in order
+    # Load, crop, resize, normalize bands
+    bands_sorted = sorted(band_files)
     normalized_stack = []
 
     base_profile = None
@@ -85,16 +87,16 @@ for base_id, band_files in image_groups.items():
 
         with rasterio.open(input_path) as src:
             if src.crs != thermal_crs:
-                print(f"⚠️ Skipping {fname}: CRS mismatch")
+                print(f"Skipping {fname}: CRS mismatch")
                 continue
 
             if base_profile is None:
-                base_profile = src.profile.copy()  # Capture once
+                base_profile = src.profile.copy()
 
             try:
                 window = from_bounds(*thermal_bounds, transform=src.transform)
             except ValueError:
-                print(f"❌ Failed windowing for {fname}, skipping")
+                print(f"Failed windowing for {fname}, skipping")
                 continue
 
             cropped = src.read(1, window=window, boundless=True)
@@ -115,10 +117,9 @@ for base_id, band_files in image_groups.items():
             normalized_stack.append(normalized)
 
     if len(normalized_stack) != 3:
-        print(f"❌ Skipping {base_id}: Could not process all 3 bands")
+        print(f"Skipping {base_id}: Could not process all 3 bands")
         continue
 
-    # Stack and save
     stacked = np.stack(normalized_stack, axis=0)
     out_profile = src.profile.copy()
     out_profile.update({

@@ -1,4 +1,10 @@
-﻿import numpy as np
+﻿'''
+This file carries out an analytical process for thermal signatures, plotting the thermal signatures of all classes
+present in the geological maps inside the thermal images, aiding in understanding the thermal behaviour of rocks and
+soils throughout the seasons and years.
+'''
+
+import numpy as np
 import matplotlib.pyplot as plt
 import rasterio
 import os
@@ -10,9 +16,6 @@ import pandas as pd
 
 
 def interpolate_nans(values):
-    """
-    Interpolate NaNs in a list or array using linear interpolation.
-    """
     series = pd.Series(values)
     return series.interpolate(method='linear', limit_direction='both').to_numpy()
 
@@ -20,24 +23,20 @@ def interpolate_nans(values):
 class ThermalSignatureAnalyzer:
     def __init__(self, geo_map_path, thermal_images_dir):
         """
-        Initialize the thermal signature analyzer
-
-        Parameters:
-        geo_map_path (str): Path to the geo map with class labels
-        thermal_images_dir (str): Directory containing ECOSTRESS thermal images
+        Thermal signature analyzer class. Contains the path to the geo map labels and the directory with the thermal images.
         """
         self.geo_map_path = geo_map_path
         self.thermal_images_dir = thermal_images_dir
 
-        # Class definitions
+        # Classes
         self.class_names = {
             0: 'NaN values',
-            1: 'Sand (Arenas)',
-            2: 'Clay (Arcillas)',
-            3: 'Chalk (Tiza)',
-            4: 'Silt (Limos)',
-            5: 'Peat (Turba)',
-            6: 'Loam (Marga)',
+            1: 'Sand',
+            2: 'Clay',
+            3: 'Chalk',
+            4: 'Silt',
+            5: 'Peat',
+            6: 'Loam',
             7: 'Detritic',
             8: 'Carbonate',
             9: 'Volcanic',
@@ -47,7 +46,7 @@ class ThermalSignatureAnalyzer:
             13: 'Water'
         }
 
-        # Colors for plotting (similar to reference image)
+        # Colors
         self.colors = {
             1: '#1f77b4',  # blue
             2: '#ff7f0e',  # orange
@@ -68,7 +67,6 @@ class ThermalSignatureAnalyzer:
         self.thermal_data = {}
 
     def load_geo_map(self):
-        """Load the geo map with class labels"""
         try:
             with rasterio.open(self.geo_map_path) as dataset:
                 self.geo_map = dataset.read(1)
@@ -80,10 +78,6 @@ class ThermalSignatureAnalyzer:
         return True
 
     def extract_date_from_filename(self, filename):
-        """
-        Extract date from ECOSTRESS filename
-        Example: ECO_L2T_LSTE.002_LST_doy2023171114725_aid0001_30N
-        """
         try:
             # Extract the DOY (Day of Year) part
             match = re.search(r'doy(\d{7})', filename)
@@ -101,17 +95,13 @@ class ThermalSignatureAnalyzer:
         return None
 
     def load_thermal_images(self):
-        """Load all thermal images from the directory"""
-        # Look specifically for ECOSTRESS LST files (exclude cloud files)
         pattern = os.path.join(self.thermal_images_dir, "*ECO_L2T_LSTE*LST_*.tif")
         thermal_files = glob.glob(pattern)
 
         if not thermal_files:
-            # Alternative pattern for LST files
             pattern = os.path.join(self.thermal_images_dir, "*LST_doy*.tif")
             thermal_files = glob.glob(pattern)
 
-        # Filter out cloud files explicitly
         thermal_files = [f for f in thermal_files if 'err' not in os.path.basename(f).lower()]
 
         print(f"Found {len(thermal_files)} thermal image files")
@@ -121,16 +111,13 @@ class ThermalSignatureAnalyzer:
             date = self.extract_date_from_filename(filename)
 
             if date is None:
-                # Use filename as identifier if date extraction fails
                 date = filename
 
             try:
                 with rasterio.open(file_path) as dataset:
                     thermal_array = dataset.read()
 
-                    # Handle different dimensions
                     if len(thermal_array.shape) == 3:
-                        # If 3D, take first band
                         thermal_array = thermal_array[0]
 
                     print(f"Loaded thermal image: {filename}, shape: {thermal_array.shape}")
@@ -142,13 +129,11 @@ class ThermalSignatureAnalyzer:
 
     def align_dimensions(self, thermal_image):
         """
-        Align thermal image dimensions with geo map
-        Handle cases where thermal images have slightly different dimensions
+        Aligns thermal image dimensions with geo map
         """
         geo_h, geo_w = self.geo_map.shape
         therm_h, therm_w = thermal_image.shape
 
-        # Crop or pad thermal image to match geo map
         if therm_h > geo_h:
             thermal_image = thermal_image[:geo_h, :]
         elif therm_h < geo_h:
@@ -165,46 +150,38 @@ class ThermalSignatureAnalyzer:
 
     def calculate_class_statistics(self, use_median=True):
         """
-        Calculate temporal thermal statistics for each class
-
-        Parameters:
-        use_median (bool): Use median instead of mean for more robust statistics
+        Calculates temporal thermal statistics for each class.
         """
         if self.geo_map is None:
             print("Geo map not loaded!")
             return None
 
         dates = sorted(self.thermal_data.keys())
-        # classes = [c for c in range(1, 14) if c != 0]  # Exclude NaN values (class 0)
-        classes = [1, 2]
+        classes = [c for c in range(1, 14) if c != 0]  # and exclude NaN values (class 0)
+        # classes = [1, 2]
 
-        # Initialize results dictionary
         results = {cls: [] for cls in classes}
         valid_dates = []
 
         print("Calculating class statistics...")
-
         for date in dates:
             thermal_image = self.thermal_data[date]
 
-            # Align dimensions
             thermal_aligned = self.align_dimensions(thermal_image)
 
-            # Check if alignment was successful
             if thermal_aligned.shape != self.geo_map.shape:
                 print(f"Skipping {date}: dimension mismatch after alignment")
                 continue
 
             valid_dates.append(date)
 
-            # Calculate statistics for each class
             for class_id in classes:
                 class_mask = (self.geo_map == class_id)
                 class_thermal_values = thermal_aligned[class_mask]
 
-                # Remove NaN and invalid values
+                # Get rid of NaN and invalid values
                 valid_values = class_thermal_values[~np.isnan(class_thermal_values)]
-                valid_values = valid_values[valid_values > 0]  # Remove invalid thermal values
+                valid_values = valid_values[valid_values > 0]
 
                 if len(valid_values) > 0:
                     if use_median:
@@ -225,7 +202,7 @@ class ThermalSignatureAnalyzer:
         """
         Plot thermal signatures separately for each year
         """
-        # Group indices of dates by year
+        # Indices by year
         from collections import defaultdict
         yearly_indices = defaultdict(list)
         for idx, date in enumerate(dates):
@@ -237,19 +214,16 @@ class ThermalSignatureAnalyzer:
             if not indices:
                 continue
 
-            # Extract the subset of dates and results for this year
+            # Dates and results of year
             year_dates = [dates[i] for i in indices]
 
-            # Subset results for each class
+            # Results for each class
             year_results = {}
             for class_id, values in results.items():
                 year_results[class_id] = [values[i] for i in indices]
 
-            # Plot using your existing plot function, but tweak to accept subset
             print(f"Plotting year {year} with {len(indices)} dates")
-            self.plot_temporal_signatures(year_results, year_dates,
-                                          save_path=(os.path.join(save_dir,
-                                                                  f'temporal_thermal_signatures_{year}.png') if save_dir else None))
+            self.plot_temporal_signatures(year_results, year_dates, save_path=(os.path.join(save_dir, f'temporal_thermal_signatures_{year}.png') if save_dir else None))
 
     def plot_temporal_signatures(self, results, dates, save_path=None):
         """
@@ -257,22 +231,17 @@ class ThermalSignatureAnalyzer:
         """
         plt.figure(figsize=(12, 8))
 
-        # Convert dates to indices for x-axis
         x_indices = range(len(dates))
-
-        # Debug: Print what we're plotting
         print(f"Plotting {len(dates)} time points")
-
-        # Plot each class
         plotted_classes = 0
         for class_id in sorted(results.keys()):
-            if class_id == 0:  # Skip NaN values
+            # avoid nans
+            if class_id == 0:
                 continue
 
             y_values = results[class_id]
             y_values = interpolate_nans(y_values)
-
-            # Skip classes with no valid data
+            # avoid invalid
             valid_count = sum(1 for v in y_values if not np.isnan(v))
             if valid_count == 0:
                 print(f"Skipping Class {class_id}: No valid data points")
@@ -291,18 +260,14 @@ class ThermalSignatureAnalyzer:
                   f"temp range: {np.nanmin(y_values):.1f}-{np.nanmax(y_values):.1f}K")
 
         print(f"Total classes plotted: {plotted_classes}")
-
         plt.xlabel('Date Index of Thermal Imagery')
         plt.ylabel('Temperature (K)')
         plt.title('Temporal Thermal Signatures by Soil Class')
         plt.grid(True, alpha=0.3)
         plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
 
-        # Set y-axis limits similar to reference image
-        plt.ylim(260, 330)
+        plt.ylim(260, 330)  # or 240, 340
 
-        # Format x-axis to show date indices
-        # Create date labels for display (actual dates)
         date_labels = []
         for d in dates:
             if hasattr(d, 'strftime'):
@@ -312,13 +277,11 @@ class ThermalSignatureAnalyzer:
 
         # Show every nth label to avoid overcrowding
         if len(x_indices) > 0:
-            step = max(1, len(x_indices) // 10)
-            xtick_positions = x_indices[::step]
-            xtick_labels = date_labels[::step]
+            xtick_positions = x_indices
+            xtick_labels = date_labels
 
             plt.xticks(xtick_positions, xtick_labels, rotation=45)
 
-            # Add secondary x-axis with indices
             ax = plt.gca()
             ax2 = ax.twiny()
             ax2.set_xlim(ax.get_xlim())
@@ -336,25 +299,19 @@ class ThermalSignatureAnalyzer:
 
     def run_analysis(self, thermal_images_dir=None, use_median=True, save_plot=None):
         """
-        Run the complete thermal signature analysis
+        Complete thermal signature analysis
         """
         if thermal_images_dir:
             self.thermal_images_dir = thermal_images_dir
 
         print("Starting Thermal Signature Analysis...")
-
-        # Load geo map
         if not self.load_geo_map():
             return
-
-        # Load thermal images
         self.load_thermal_images()
-
         if not self.thermal_data:
             print("No thermal data loaded!")
             return
 
-        # Calculate statistics
         results, dates = self.calculate_class_statistics(use_median=use_median)
 
         if results and dates:
@@ -363,28 +320,23 @@ class ThermalSignatureAnalyzer:
             print("Failed to calculate statistics!")
             return
 
-        # Create plot
         self.plot_temporal_signatures(results, dates, save_path=save_plot)
-
         return results, dates
 
 
 # Example usage
 if __name__ == "__main__":
-    # Initialize analyzer
     geo_map_path = r"C:\Users\txiki\OneDrive\Documents\Studies\MSc_Geomatics\2Y\Thesis\Masks\Santa Olalla masks\Geo_map_resized_Santa.tif"
     thermal_images_dir = r"C:\Users\txiki\OneDrive\Documents\Studies\MSc_Geomatics\2Y\Thesis\THERMAL\Santa_full"
 
     analyzer = ThermalSignatureAnalyzer(geo_map_path, thermal_images_dir)
 
-    # Run analysis
     results, dates = analyzer.run_analysis(
         thermal_images_dir=thermal_images_dir,
         use_median=True,
         save_plot="temporal_thermal_signatures.png"
     )
 
-    # Print summary statistics
     if results:
         print("\nSummary Statistics:")
         for class_id, values in results.items():

@@ -1,13 +1,17 @@
 ﻿'''
-Here, the algorithm will receive a set of thermal images and output a correct classification
-of the type of rock or soil the image contains.
+Thermal data:
+This file will contain the main Convolutional Long Short-Term Memory model, with which thermal image classification will
+be performed and achieved.
+Here, the program will also be trained and tested, with parameter tunning taking place here as well.
 
-It will order the images in a temporal sequence.
+Geological Maps:
+· Pre-labelled geological maps
+· Converted into segmentation greyscale masks matching the input shape of images in the CNN with same CRS
+· Each pixel corresponds to a specific class (rock/soil) with numbers (sand=1, clay=2, chalk=3, etc.)
 
-Then, with TimeDistributed, apply the trained CNN model across the sequence.
-
-ConvLSTM layers will be used to analyse spatial and temporal dependencies + include dropouts
-to control overfitting + batch normalization for stable training.
+Evaluation:
+    - overlay output of models over the geological maps and compare pixel by pixel
+    - Accuracy, F1 score, IoU inside model (during training)
 '''
 
 import numpy as np
@@ -38,7 +42,7 @@ from collections import defaultdict
 
 
 # -------------- LOADING DATA ------------------------------------------------------------------------------------------
-data_path = 'E:/Studies/Thesis/THERMAL/Villoslada/Villoslada_thermal_sar/'
+data_path = "C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Outputs/Puertollano/Puertollano_thermal_day/"
 X_train = np.load(data_path + 'X_train_seq.npy')
 X_valid = np.load(data_path + 'X_valid_seq.npy')
 X_test = np.load(data_path + 'X_test_seq.npy')
@@ -60,27 +64,42 @@ for channel in range(X_train.shape[-1]):
 #X_valid = X_valid[:, :, :, :, :2]
 #X_test = X_test[:, :, :, :, :2]
 
-print("Dataset loaded successfully!")
-print(f"X_train shape: {X_train.shape}")
-print(f"y_train shape: {y_train.shape}")
-print(f"X_valid shape: {X_valid.shape}")
-print(f"y_valid shape: {y_valid.shape}")
-print(f"X_test shape: {X_test.shape}")
-print(f"y_test shape: {y_test.shape}")
-
 
 # -------------- ConvLSTM U-Net ----------------------------------------------------------------------------------------
 def clstm_unet_model(size_input=(5, 64, 64, 2), filters_base=16, classes=14, l2_reg=0.01):
+    '''
+    U-Net architecture with encoder and decoder.
+    '''
     def Encoder(inputs, filters, dropout, l2factor, max_pooling=True):
+        '''
+        Convolutional and pooling layers, in tandem with ReLU activation function to learn.
+        Dropout additional to prevent overfitting problems.
+        '''
+        # 2 convolutional layers with ReLU and HeNormal initialization
+        # Proper initialization to prevent gradient problems
+        # Padding 'same' means that the dimensionality of the images is not
+        # reduced after each convolution (useful for U-Net arhitecture)
         convolution = ConvLSTM2D(filters, (3, 3), activation='relu', padding='same', kernel_initializer='he_normal',
                              kernel_regularizer=l2(l2factor), return_sequences=True)(inputs)
         convo = BatchNormalization()(convolution)
 
+        # Conv2D(number of filters, kernel size, activation function, padding, initialization) - input shape established in thermal.py
+        # L2 regularization = weight decay, prevents overfitting by adding a penalty to the loss function
+        # based on sum of squared values of the model’s weights.
+        # If value reduced, model is more flexible. If increased might underfit.
         convolution2 = ConvLSTM2D(filters, (3, 3), activation='relu', padding='same', kernel_initializer='he_normal',
             kernel_regularizer=l2(l2factor), return_sequences=True)(convo)
         convo2 = BatchNormalization()(convolution2)
+        # batch normalization to normalize output
+        # BN best before dropout, as dropout disrupts the stability (removes neurons) BN needs to normalize a stable distribution of activations
+        # BN best before activation function and dropout as it prevents instability issues and ensures proper gradient flow
+
+        # If overfitting, dropout regularizes loss and gradient
+        # to minimize influence of weights on the output
         if dropout > 0:
             convo2 = SpatialDropout3D(dropout)(convo2)
+
+        # Pooling - reduces image size while maintaining channel number
         if max_pooling:
             next_layer = MaxPooling3D(pool_size=(1, 2, 2))(convo2)
         else:
@@ -90,6 +109,10 @@ def clstm_unet_model(size_input=(5, 64, 64, 2), filters_base=16, classes=14, l2_
         return next_layer, skip_connection
 
     def Decoder(previous_layer, skip, filters, l2factor):
+        '''
+        Transpose convolutions to make images bigger (upscale) back to original size and merges with skip layer from Encoder.
+        2 convolutional layers with 'same' padding increases depth of architecture for better predictions.
+        '''
         upscale = tf.keras.layers.Reshape(
             (1, previous_layer.shape[1], previous_layer.shape[2], previous_layer.shape[3]))(previous_layer)
         upscale = UpSampling3D(size=(1, 2, 2))(upscale)
@@ -98,7 +121,7 @@ def clstm_unet_model(size_input=(5, 64, 64, 2), filters_base=16, classes=14, l2_
         skip_last = tf.keras.layers.Lambda(lambda x: x[:, -1:, :, :, :])(skip)
         combination = concatenate([upscale, skip_last], axis=4)
 
-        # Use Conv2D instead of ConvLSTM2D in decoder since we're no longer processing sequences
+        # Conv2D instead of ConvLSTM2D in decoder since we're no longer processing sequences
         combination = tf.keras.layers.Reshape((combination.shape[2], combination.shape[3], combination.shape[4]))(
             combination)
         convolution = Conv2D(filters, (3, 3), activation='relu', padding='same',
@@ -107,6 +130,7 @@ def clstm_unet_model(size_input=(5, 64, 64, 2), filters_base=16, classes=14, l2_
 
         return convo
 
+    # input size of the image
     inputs = tf.keras.layers.Input(shape=size_input)
 
     # encoder
@@ -142,20 +166,8 @@ def clstm_unet_model(size_input=(5, 64, 64, 2), filters_base=16, classes=14, l2_
     return model
 
 
-'''
-TimeDistributed CNN:
-    cnn = base_cnn(input_shape)
-    cnn_td = TimeDistributed(cnn)(inputs)  # CNN applied to each frame
-
-    # ConvLSTM to process time-sequence
-    x = ConvLSTM2D(64, (3, 3), activation='relu', padding='same', return_sequences=False)(cnn_td)
-    x = BatchNormalization()(x)
-    x = Dropout(0.2)(x)
-'''
-
-
 class EpochTracker(tf.keras.callbacks.Callback):
-    """Custom callback to track predictions and metrics at each epoch"""
+    """Track predictions and metrics at each epoch"""
 
     def __init__(self, X_test, y_test, compute_metrics_fn):
         super().__init__()
@@ -175,7 +187,7 @@ class EpochTracker(tf.keras.callbacks.Callback):
         print(f"Will store predictions for epochs: {self.epochs_to_store}")
 
     def _get_epochs_to_store(self):
-        """Define which epochs to store predictions for"""
+        """Epochs from which to store predictions."""
         if self.total_epochs < 6:
             return list(range(1, self.total_epochs + 1))
         else:
@@ -194,19 +206,12 @@ class EpochTracker(tf.keras.callbacks.Callback):
             batch_pred = self.model.predict(batch_X, verbose=0, batch_size=4)
             predictions_list.append(batch_pred)
 
-        # Concatenate all predictions
         predictions = np.concatenate(predictions_list, axis=0)
-
-        # Convert to class indices for metrics
         pred_classes = np.argmax(predictions, axis=-1)
-
-        # Compute metrics
         metrics = self.compute_metrics_fn(self.y_test, pred_classes)
 
-        # Always store metrics (lightweight)
         self.epoch_metrics.append(metrics)
 
-        # Only store predictions for selected epochs (memory intensive)
         if current_epoch in self.epochs_to_store:
             print(f"  → Storing predictions for epoch {current_epoch} (selected epoch)")
             self.selected_epoch_predictions[current_epoch] = pred_classes.copy()
@@ -214,11 +219,9 @@ class EpochTracker(tf.keras.callbacks.Callback):
         else:
             print(f"  → Skipping prediction storage for epoch {current_epoch}")
 
-        # Print epoch summary
         print(f"Epoch {current_epoch} - Test Accuracy: {metrics['accuracy']:.4f}, "
               f"Mean IoU: {metrics['mean_iou']:.4f}")
 
-        # Memory cleanup
         del predictions, pred_classes
         import gc
         gc.collect()
@@ -226,14 +229,11 @@ class EpochTracker(tf.keras.callbacks.Callback):
 
 # -------------- LOSS FUNCTION -----------------------------------------------------------------------------------------
 def simple_weighted_loss(class_weights):
-    """Much simpler weighted loss function"""
-
     def loss_fn(y_true, y_pred):
-        # Convert to sparse categorical crossentropy with class weights
         y_true = tf.squeeze(y_true, axis=-1)  # [4,64,64,1] -> [4,64,64]
         loss = tf.keras.losses.sparse_categorical_crossentropy(y_true, y_pred)
 
-        # Apply class weights
+        # Class weights
         sample_weights = tf.gather([
             class_weights.get(0, 1.0), class_weights.get(1, 1.0), class_weights.get(2, 1.0),
             class_weights.get(3, 1.0), class_weights.get(4, 1.0), class_weights.get(5, 1.0),
@@ -250,28 +250,10 @@ def simple_weighted_loss(class_weights):
 # -------------- TRAINING ----------------------------------------------------------------------------------------------
 def train_evaluate_model(X_train, y_train, X_val, y_val, X_test, y_test, use_optuna=True, n_trials=30, epochs=30):
     """
-    Train and evaluate ConvLSTM model with optional Optuna hyperparameter optimization
-
-    Parameters:
-    -----------
-    X_train, y_train, w_train : Training data and weights
-    X_val, y_val, w_val : Validation data and weights
-    X_test, y_test, w_test : Test data and weights
-    use_optuna : bool, whether to use Optuna optimization
-    n_trials : int, number of Optuna trials to run
-
-    Returns:
-    --------
-    model : trained model
-    history : training history
-    y_pred : predictions on test set
-    best_params : best hyperparameters found (or default if not using Optuna)
+    Training and evaluation of model with optional Optuna hyperparameter optimization.
     """
 
     print("=== ConvLSTM U-Net Training ===")
-    print("X_train shape:", X_train.shape)
-    print("y_train shape:", y_train.shape)
-
     if use_optuna:
         print("=== STARTING OPTUNA HYPERPARAMETER OPTIMIZATION ===")
 
@@ -286,15 +268,13 @@ def train_evaluate_model(X_train, y_train, X_val, y_val, X_test, y_test, use_opt
             weight_strength = trial.suggest_float('weight_strength', 0.5, 2.0)
 
             try:
-                # Create model with suggested hyperparameters
+                # MODEL
                 model = clstm_unet_model(
                     size_input=(5, 64, 64, 1),
                     filters=32,
                     classes=14)
 
-                print("Model output shape:", model.output_shape)
-
-                # Compile model
+                # OPTIMIZER and LOSS
                 optimizer = tf.keras.optimizers.Adam(learning_rate=best_params['learning_rate'])
                 loss = tf.keras.losses.SparseCategoricalCrossentropy()
 
@@ -304,17 +284,17 @@ def train_evaluate_model(X_train, y_train, X_val, y_val, X_test, y_test, use_opt
                     metrics=['accuracy', 'precision', 'recall']
                 )
 
-                # Callbacks for optimization (shorter patience for faster trials)
+                # CALLBACKS
                 early_stopping = tf.keras.callbacks.EarlyStopping(
                     monitor='val_loss', patience=5, restore_best_weights=True, verbose=0
                 )
                 pruning_callback = optuna.integration.TFKerasPruningCallback(trial, 'val_loss')
 
-                # Train with reduced epochs for optimization
+                # TRAINING
                 history = model.fit(
                     X_train, y_train,
                     validation_data=(X_val, y_val),
-                    epochs=15,  # Reduced for faster optimization
+                    epochs=15,
                     batch_size=batch_size,
                     callbacks=[early_stopping, pruning_callback],
                     verbose=0
@@ -327,7 +307,6 @@ def train_evaluate_model(X_train, y_train, X_val, y_val, X_test, y_test, use_opt
                 print(f"Trial failed: {e}")
                 return float('inf')
 
-        # Run optimization
         study = optuna.create_study(
             direction='minimize',
             pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=5)
@@ -338,25 +317,22 @@ def train_evaluate_model(X_train, y_train, X_val, y_val, X_test, y_test, use_opt
         print(f"\nOptimization completed!")
         print(f"Best parameters: {study.best_params}")
         print(f"Best validation loss: {study.best_value:.4f}")
-
-        # Use best parameters
         best_params = study.best_params
 
     else:
-        # Use default parameters
+        # base params
         best_params = {
             'learning_rate': 0.00001,
             'l2factor': 0.05,
             'batch_size': 4,
             'filters_base': 16
         }
-        print("=== USING DEFAULT PARAMETERS (NO OPTUNA) ===")
+        print("=== USING BASE PARAMETERS (NO OPTUNA) ===")
 
     print("\n=== TRAINING FINAL ConvLSTM MODEL ===")
-
-    # Train final model with best/default parameters
     tf.keras.backend.clear_session()
 
+    # MODEL
     model = clstm_unet_model(
         size_input=(5, 64, 64, 2),
         filters_base=best_params['filters_base'],
@@ -385,20 +361,21 @@ def train_evaluate_model(X_train, y_train, X_val, y_val, X_test, y_test, use_opt
     # Santa Olalla - 1, 3, 4, 7, 8, 9, 10, 11, 12
     # Villoslada - 1, 2, 4, 5, 7, 8
 
-    optimizer = tf.keras.optimizers.AdamW(learning_rate=best_params['learning_rate'], clipnorm=1.0)
+    # OPTIMIZER and LOSS
+    optimizer = tf.keras.optimizers.Adam(learning_rate=best_params['learning_rate'])
     loss = tf.keras.losses.SparseCategoricalCrossentropy()
     # loss = simple_weighted_loss(class_weights)
 
     model.compile(
         optimizer=optimizer,
         loss=loss,
-        metrics=['accuracy', tf.keras.metrics.SparseCategoricalAccuracy(), f1_score_keras]
+        metrics=['accuracy', tf.keras.metrics.SparseCategoricalAccuracy()]
     )
 
-    # Initialize the callback
+    # TRACKER
     epoch_tracker = EpochTracker(X_test, y_test, compute_metrics)
 
-    # Callbacks for final training
+    # CALLBACKS
     lr_callback = tf.keras.callbacks.ReduceLROnPlateau(
         monitor='val_loss',
         factor=0.5,
@@ -412,7 +389,7 @@ def train_evaluate_model(X_train, y_train, X_val, y_val, X_test, y_test, use_opt
         restore_best_weights=True
     )
 
-    # Training with full epochs
+    # TRAINING
     print("Training final ConvLSTM model...")
     history = model.fit(
         X_train, y_train,
@@ -423,7 +400,6 @@ def train_evaluate_model(X_train, y_train, X_val, y_val, X_test, y_test, use_opt
         verbose=1
     )
 
-    # Evaluation
     print("\n=== FINAL EVALUATION ===")
     evaluation_results = model.evaluate(X_test, y_test, batch_size=4, verbose=0)
     result_names = ['Loss', 'Accuracy', 'Sparse Categorical Accuracy', 'F1 Score']
@@ -446,12 +422,9 @@ def train_evaluate_model(X_train, y_train, X_val, y_val, X_test, y_test, use_opt
 
 
 # -------------- PERFORMANCE -------------------------------------------------------------------------------------------
-def compute_metrics(y_true, y_pred):
+def compute_metrics(y_true, y_pred, class_names=None, print_results=True):
     """
-    Compute metrics for segmentation task
-    Args:
-        y_true: Ground truth one-hot encoded labels (samples, height, width, classes)
-        y_pred: Model predictions as probabilities (samples, height, width, classes)
+    Metric computation for segmentation.
     """
     print("Computing metrics for full images...")
     # Convert predictions to class indices if they're probabilities
@@ -459,95 +432,113 @@ def compute_metrics(y_true, y_pred):
     y_true_flat = y_true.flatten()
     y_pred_flat = y_pred.flatten()
 
-    # remove any padding/invalid values
-    valid_mask = (y_true_flat >= 0) & (y_true_flat < 14)
-    y_true_flat = y_true_flat[valid_mask]
-    y_pred_flat = y_pred_flat[valid_mask]
-
-    accuracy = accuracy_score(y_true_flat, y_pred_flat)
-    precision = precision_score(y_true_flat, y_pred_flat, average='macro', zero_division=0)
-    recall = recall_score(y_true_flat, y_pred_flat, average='macro', zero_division=0)
-    f1 = f1_score(y_true_flat, y_pred_flat, average='macro', zero_division=0)
-
-    # Calculate IoU and Dice for each class then average
     unique_classes = np.unique(np.concatenate([y_true_flat, y_pred_flat]))
-    iou_values = []
-    dice_values = []
+    n_classes = len(unique_classes)
 
-    for cls in unique_classes:
-        if cls < 0 or cls >= 14:
-            continue
+    # Confusion matrix
+    cm = confusion_matrix(y_true_flat, y_pred_flat, labels=unique_classes)
+    per_class_iou = {}
+    iou_scores = []
 
-        y_true_cls = (y_true_flat == cls)
-        y_pred_cls = (y_pred_flat == cls)
+    for i, class_id in enumerate(unique_classes):
+        # IoU = TP / (TP + FP + FN)
+        tp = cm[i, i]  # True positives
+        fp = cm[:, i].sum() - tp  # False positives
+        fn = cm[i, :].sum() - tp  # False negatives
 
-        intersection = np.logical_and(y_true_cls, y_pred_cls).sum()
-        union = np.logical_or(y_true_cls, y_pred_cls).sum()
-
-        if union > 0:
-            iou = intersection/union
-            dice = (2 * intersection) / (np.sum(y_true_cls) + np.sum(y_pred_cls) + 1e-7)
-        else:
+        if tp + fp + fn == 0:
             iou = 0.0
-            dice = 0.0
-        iou_values.append(iou)
-        dice_values.append(dice)
+        else:
+            iou = tp / (tp + fp + fn)
 
-    mean_iou = np.mean(iou_values)
-    mean_dice = np.mean(dice_values)
+        class_name = class_names[class_id] if class_names else f"Class_{class_id}"
+        per_class_iou[class_name] = iou
+        iou_scores.append(iou)
+        if print_results:
+            print(f"{class_name} (ID: {class_id}): IoU = {iou:.4f} | TP={tp}, FP={fp}, FN={fn}")
 
-    metrics = {
+    # Macro F1 (average of per-class F1 scores)
+    f1_macro = f1_score(y_true_flat, y_pred_flat, labels=unique_classes, average='macro')
+    # Weighted F1 (weighted by support)
+    f1_weighted = f1_score(y_true_flat, y_pred_flat, labels=unique_classes, average='weighted')
+    # Per-class F1 score
+    f1_per_class = f1_score(y_true_flat, y_pred_flat, labels=unique_classes, average=None)
+
+    # Mean IoU
+    if 0 in unique_classes and len(unique_classes) > 1:
+        non_bg_ious = [iou for i, iou in enumerate(iou_scores) if unique_classes[i] != 0]
+        mean_iou = np.mean(non_bg_ious) if non_bg_ious else 0.0
+        mean_iou_all = np.mean(iou_scores)
+    else:
+        mean_iou = np.mean(iou_scores)
+        mean_iou_all = mean_iou
+
+    accuracy = np.sum(y_true_flat == y_pred_flat) / len(y_true_flat)
+
+    if print_results:
+        print(f"\nOverall Metrics:")
+        print(f"Accuracy: {accuracy:.4f}")
+        print(f"Mean IoU (excluding background): {mean_iou:.4f}")
+        print(f"Mean IoU (all classes): {mean_iou_all:.4f}")
+        print(f"F1 Score (Macro): {f1_macro:.4f}")
+        print(f"F1 Score (Weighted): {f1_weighted:.4f}")
+        print(f"\nPer-class F1 scores:")
+        for i, class_id in enumerate(unique_classes):
+            class_name = class_names[class_id] if class_names else f"Class_{class_id}"
+            print(f"{class_name}: {f1_per_class[i]:.4f}")
+        print("-" * 50)
+
+    return {
         'accuracy': accuracy,
-        'precision': precision,
-        'recall': recall,
-        'f1_score': f1,
         'mean_iou': mean_iou,
-        'mean_dice': mean_dice,
+        'mean_iou_all': mean_iou_all,
+        'per_class_iou': per_class_iou,
+        'iou_scores': iou_scores,
+        'unique_classes': unique_classes,
+        'f1_macro': f1_macro,
+        'f1_weighted': f1_weighted,
+        'f1_per_class': f1_per_class
     }
-
-    return metrics
 
 
 from tensorflow.keras import backend as K
+
 
 def f1_score_keras(y_true, y_pred):
     """
     F1 score metric for Keras - works with multi-class segmentation
     """
-    # Convert predictions to class indices
-    y_pred_classes = K.argmax(y_pred, axis=-1)
+    def recall_m(y_true, y_pred):
+        true_positives = K.sum(K.round(K.clip(y_true * y_pred, 0, 1)))
+        possible_positives = K.sum(K.round(K.clip(y_true, 0, 1)))
+        recall = true_positives / (possible_positives + K.epsilon())
+        return recall
 
-    # Cast to same type
-    y_true = K.cast(K.flatten(y_true), tf.float32)
-    y_pred_classes = K.cast(K.flatten(y_pred_classes), tf.float32)
+    def precision_m(y_true, y_pred):
+        true_positives = K.sum(K.round(K.clip(y_true * y_pred, 0, 1)))
+        predicted_positives = K.sum(K.round(K.clip(y_pred, 0, 1)))
+        precision = true_positives / (predicted_positives + K.epsilon())
+        return precision
 
-    # Calculate overall precision and recall (micro-average)
-    true_positives = K.sum(K.cast(K.equal(y_true, y_pred_classes), tf.float32))
-    total_samples = K.cast(K.shape(y_true)[0], tf.float32)
-
-    # This gives us accuracy, which for multiclass can serve as a proxy
-    accuracy = true_positives / total_samples
-
-    # For multiclass, we'll return accuracy as F1 approximation
-    return accuracy
+    precision = precision_m(y_true, y_pred)
+    recall = recall_m(y_true, y_pred)
+    return 2 * ((precision * recall) / (precision + recall + K.epsilon()))
 
 
 # -------------- EVALUATION --------------------------------------------------------------------------------------------
 def plot_training(history):
     """
-    Enhanced plotting function that includes F1 score if available
+    Plotting function for metric evolution viewing
     """
-    # Check what metrics are available in history
     available_metrics = list(history.history.keys())
     has_f1 = any('f1' in metric.lower() for metric in available_metrics)
 
-    # Determine number of subplots based on available metrics
     if has_f1:
         fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     else:
         fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
-    # Plot 1: Loss
+    # Loss
     axes[0].plot(history.history['loss'], label='Training Loss')
     if 'val_loss' in history.history:
         axes[0].plot(history.history['val_loss'], label='Validation Loss')
@@ -557,7 +548,7 @@ def plot_training(history):
     axes[0].legend()
     axes[0].grid(True)
 
-    # Plot 2: Accuracy
+    # Accuracy
     axes[1].plot(history.history['accuracy'], label='Training Accuracy')
     if 'val_accuracy' in history.history:
         axes[1].plot(history.history['val_accuracy'], label='Validation Accuracy')
@@ -567,7 +558,7 @@ def plot_training(history):
     axes[1].legend()
     axes[1].grid(True)
 
-    # Plot 3: F1 Score
+    # F1 Score
     if has_f1:
         f1_keys = [key for key in available_metrics if 'f1' in key.lower() and not key.startswith('val_')]
         val_f1_keys = [key for key in available_metrics if 'f1' in key.lower() and key.startswith('val_')]
@@ -584,51 +575,24 @@ def plot_training(history):
         axes[2].set_ylabel('F1 Score')
         axes[2].legend()
         axes[2].grid(True)
-
     plt.tight_layout()
     plt.show()
 
 
-def visualize_convlstm_results(X_test, y_test, predictions, num_patches=3, patch_indices=None,
-                               timestep_to_visualize=-1, figsize=(15, 5), cmap_thermal='hot',
-                               cmap_segmentation='tab20'):
+def visualize_convlstm_results(X_test, y_test, predictions, num_patches=3, patch_indices=None, timestep_to_visualize=-1, figsize=(15, 5), cmap_thermal='hot', cmap_segmentation='tab20'):
     """
-    Visualize ConvLSTM results showing thermal image sequences, ground truth labels, and predictions
-
-    Parameters:
-    -----------
-    X_test : numpy array, shape (n_samples, 5, 64, 64, 2)
-        Test thermal image sequences with 5 timesteps and 2 channels
-    y_test : numpy array, shape (n_samples, 64, 64, 1) or (n_samples, 64, 64)
-        Ground truth segmentation labels (final timestep)
-    predictions : numpy array, shape (n_samples, 64, 64)
-        Model predictions
-    num_patches : int
-        Number of sequences to visualize (default: 3)
-    patch_indices : list or None
-        Specific sequence indices to visualize. If None, random sequences are selected
-    timestep_to_visualize : int
-        Which timestep to visualize from the sequence (default: -1 for last timestep)
-    figsize : tuple
-        Figure size (width, height)
-    cmap_thermal : str
-        Colormap for thermal images
-    cmp_segmentation : str
-        Colormap for segmentation maps
+    ConvLSTM results showing thermal images, ground truth labels, and predictions
     """
-
-    # Select sequences to visualize
     if patch_indices is None:
         patch_indices = random.sample(range(len(X_test)), num_patches)
     else:
         num_patches = len(patch_indices)
 
-    # Create figure with subplots
+    # One column for each part: input, label and prediciton
     fig, axes = plt.subplots(num_patches, 3, figsize=figsize)
     if num_patches == 1:
         axes = axes.reshape(1, -1)
 
-    # Set up colormap for segmentation (14 classes)
     if cmap_segmentation == 'tab20':
         colors = plt.cm.tab20(np.linspace(0, 1, 14))
         seg_cmap = ListedColormap(colors)
@@ -636,43 +600,35 @@ def visualize_convlstm_results(X_test, y_test, predictions, num_patches=3, patch
         seg_cmap = cmap_segmentation
 
     for i, patch_idx in enumerate(patch_indices):
-        # Get data for this sequence
-        thermal_sequence = X_test[patch_idx]  # Shape: (5, 64, 64, 2)
+        thermal_sequence = X_test[patch_idx]  # (5, 64, 64, 2)
         true_labels = y_test[patch_idx]
         pred_labels = predictions[patch_idx]
 
-        # Handle y_test shape variations
         if len(true_labels.shape) == 3 and true_labels.shape[-1] == 1:
-            true_labels = true_labels.squeeze(-1)  # Remove channel dimension
+            true_labels = true_labels.squeeze(-1)
 
-        # Select timestep to visualize from the sequence
         thermal_frame = thermal_sequence[timestep_to_visualize]  # Shape: (64, 64, 2)
-
-        # Use first thermal channel for visualization
         thermal_display = thermal_frame[:, :, 0]
 
-        # Column 1: Thermal Image (selected timestep)
+        # Thermal Image (selected timestep)
         im1 = axes[i, 0].imshow(thermal_display, cmap=cmap_thermal, aspect='equal')
         timestep_label = f"t={timestep_to_visualize}" if timestep_to_visualize >= 0 else "t=final"
         axes[i, 0].set_title(f'Sequence {patch_idx + 1}: Thermal ({timestep_label})')
         axes[i, 0].axis('off')
 
-        # Column 2: Ground Truth Labels
+        # Ground Truth Labels
         im2 = axes[i, 1].imshow(true_labels, cmap=seg_cmap, vmin=0, vmax=13, aspect='equal')
         axes[i, 1].set_title(f'Sequence {patch_idx + 1}: Ground Truth')
         axes[i, 1].axis('off')
 
-        # Column 3: Predictions
+        # Predictions
         im3 = axes[i, 2].imshow(pred_labels, cmap=seg_cmap, vmin=0, vmax=13, aspect='equal')
         axes[i, 2].set_title(f'Sequence {patch_idx + 1}: Predictions')
         axes[i, 2].axis('off')
 
-    # Add colorbars
-    # Thermal colorbar
     cbar1 = plt.colorbar(im1, ax=axes[:, 0].ravel().tolist(), shrink=0.8, aspect=20)
     cbar1.set_label('Thermal Intensity', rotation=270, labelpad=15)
 
-    # Segmentation colorbar
     cbar2 = plt.colorbar(im2, ax=axes[:, 1:].ravel().tolist(), shrink=0.8, aspect=20)
     cbar2.set_label('Class Labels', rotation=270, labelpad=15)
     cbar2.set_ticks(range(14))
@@ -680,7 +636,6 @@ def visualize_convlstm_results(X_test, y_test, predictions, num_patches=3, patch
     plt.tight_layout()
     plt.show()
 
-    # Print accuracy for visualized sequences
     print(f"\nAccuracy for visualized sequences:")
     for i, patch_idx in enumerate(patch_indices):
         true_labels = y_test[patch_idx]
@@ -699,20 +654,44 @@ def visualize_convlstm_results(X_test, y_test, predictions, num_patches=3, patch
     X_test, y_test,
     use_optuna=False, n_trials=5, epochs=30)
 
-final_metrics = compute_metrics(y_test, predictions)
+class_names = [
+    "NaNs",      # Class 0
+    "Sand",         # Class 1
+    "Clay",         # Class 2
+    "Chalk",         # Class 3
+    "Silt",         # Class 4
+    "Peat",         # Class 5
+    "Loam",         # Class 6
+    "Detritic",         # Class 7
+    "Carbonate",         # Class 8
+    "Volcanic",         # Class 9
+    "Plutonic",        # Class 10
+    "Foliated",        # Class 11
+    "Non-Foliated",        # Class 12
+    "Water"         # Class 13
+]
+
+final_metrics = compute_metrics(y_test, predictions, class_names=class_names)
+
 
 print("\n=== FINAL PERFORMANCE METRICS ===")
 for metric_name, metric_value in final_metrics.items():
-    print(f"{metric_name}: {metric_value:.4f}")
+    if metric_name == 'per_class_iou':
+        print(f"{metric_name}:")
+        for class_name, iou_value in metric_value.items():
+            print(f"  {class_name}: {iou_value:.4f}")
+    elif isinstance(metric_value, (int, float, np.floating)):
+        print(f"{metric_name}: {metric_value:.4f}")
+    else:
+        print(f"{metric_name}: {metric_value}")
 
 print("\n=== BEST PARAMETERS ===")
 for param_name, param_value in best_params.items():
     print(f"{param_name}: {param_value}")
 
-visualize_convlstm_results(
-    X_test, y_test, predictions, patch_indices=[5, 10, 11], timestep_to_visualize=-1)
-
 plot_training(history)
+
+visualize_convlstm_results(X_test, y_test, predictions, patch_indices=[15, 34, 36], timestep_to_visualize=-1)
 
 '''
 Maximum patch index:
@@ -735,14 +714,15 @@ Maximum patch index:
         · thermal_winter - 35
         · thermal_summer - 46
     Puertollano:
-        · thermal only - 63
+        · thermal only - 100
         · thermal_optical - 6
         · thermal_sar - 25
         · all - 1
-        · thermal_day - 118
+        · thermal_day - 63
         · thermal_night - 52
         · thermal_winter - 56
         · thermal_summer - 55
+        5, 10, 11 son buenos patches
 '''
 
 # ---------------- SAVING ----------------------------------------------------------------------------------------------

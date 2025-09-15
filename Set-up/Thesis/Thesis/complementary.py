@@ -1,4 +1,9 @@
-﻿import os
+﻿'''
+This file carries out all the main pre-processing phase of the thermal images and the geological maps.
+It also combines all the different datasets to generate multi-modal patches ready for CNN and ConvLSTM models.
+'''
+
+import os
 import numpy as np
 import rasterio
 from rasterio.windows import Window
@@ -13,7 +18,6 @@ from datetime import datetime
 
 def extract_date_from_filename(filename):
     """
-    Extract date from ECOSTRESS filename.
     Format: *_doyYYYYDDDHHMMSS_* where YYYY=year, DDD=day of year, HHMMSS=time
     """
     match = re.search(r'doy(\d{4})(\d{3})(\d{6})', filename)
@@ -21,20 +25,18 @@ def extract_date_from_filename(filename):
         year = match.group(1)
         day_of_year = match.group(2)
         time = match.group(3)
-        return f"{year}{day_of_year}{time}"  # Return combined datetime string
+        return f"{year}{day_of_year}{time}"
     return None
 
 
 def group_files_by_date(directory):
     """
-    Group ECOSTRESS files by date and type.
+    ECOSTRESS files by date and type.
     """
     grouped_files = {}
 
-    # Debug: print all files to understand the naming pattern
-    print("Debug: Found files:")
     all_files = [f for f in os.listdir(directory) if f.endswith('.tif')]
-    for f in all_files[:10]:  # Show first 10 files
+    for f in all_files:
         print(f"  {f}")
     if len(all_files) > 10:
         print(f"  ... and {len(all_files) - 10} more files")
@@ -46,7 +48,6 @@ def group_files_by_date(directory):
                 if date not in grouped_files:
                     grouped_files[date] = {}
 
-                # More flexible file type detection
                 if '_LST_' in filename:
                     grouped_files[date]['lst'] = os.path.join(directory, filename)
                 elif 'EmisWB' in filename:
@@ -58,8 +59,7 @@ def group_files_by_date(directory):
                 elif 'water' in filename:
                     grouped_files[date]['water'] = os.path.join(directory, filename)
 
-    # Debug: show what was grouped
-    print(f"Debug: Grouped {len(grouped_files)} dates:")
+    print(f"Grouped {len(grouped_files)} dates:")
     for date, files in list(grouped_files.items())[:3]:  # Show first 3 dates
         print(f"  {date}: {list(files.keys())}")
 
@@ -68,15 +68,7 @@ def group_files_by_date(directory):
 
 def resample_to_match(source_file, target_file, output_path=None):
     """
-    Resample source_file to match the grid of target_file.
-
-    Args:
-        source_file: Path to source raster
-        target_file: Path to target raster (template)
-        output_path: Optional output path (if None, returns array)
-
-    Returns:
-        Resampled array if output_path is None, otherwise saves to file
+    Resample to match shape.
     """
     with rasterio.open(target_file) as target:
         target_profile = target.profile.copy()
@@ -85,10 +77,9 @@ def resample_to_match(source_file, target_file, output_path=None):
         target_shape = (target.height, target.width)
 
     with rasterio.open(source_file) as source:
-        # Create output array
         resampled_data = np.zeros(target_shape, dtype=source.dtypes[0])
 
-        # Reproject
+        # Re-projection
         reproject(
             source=rasterio.band(source, 1),
             destination=resampled_data,
@@ -110,18 +101,9 @@ def resample_to_match(source_file, target_file, output_path=None):
 
 def filter_dates_by_quality(grouped_files, max_cloud_percentage=10, max_bad_percentage=10):
     """
-    Filter dates based on cloud coverage and QC quality.
-
-    Args:
-        grouped_files: Dictionary of files grouped by date
-        max_cloud_percentage: Maximum allowed cloud coverage percentage
-        max_bad_percentage: Maximum allowed bad quality percentage
-
-    Returns:
-        filtered_dates: List of dates that pass quality filtering
-        date_masks: Dictionary of combined masks for each filtered date
+    Quality assessment for cloud coverage and QA quality.
     """
-    # Define good quality bits
+    # Good quality bits - based on documentation
     good_quality = [
         0, 16384, 16448, 16512, 16576, 16832, 17088, 17344, 17600, 17856,
         18112, 18368, 18624, 18880, 19136, 19392, 19904, 20160, 32768, 32832,
@@ -146,46 +128,35 @@ def filter_dates_by_quality(grouped_files, max_cloud_percentage=10, max_bad_perc
     date_masks = {}
 
     for date, files in grouped_files.items():
-        # Check if we have all required files for this date
         required_files = ['lst', 'emiswb', 'cloud', 'qc']
         if not all(file_type in files for file_type in required_files):
             print(f"Date {date}: Missing required files, skipping")
             continue
 
         print(f"Processing date {date}...")
-
         try:
-            # Use LST as reference for grid alignment
+            # LST is reference for grid alignment - since lowest resolution
             lst_file = files['lst']
-
-            # Load cloud data and resample to match LST grid
+            # Match the cloud and qa data
             cloud_data = resample_to_match(files['cloud'], lst_file)
-
-            # Load QC data and resample to match LST grid
             qc_data = resample_to_match(files['qc'], lst_file)
 
-            # Calculate cloud percentage
+            # cloud percentage
             total_pixels = cloud_data.size
             cloud_pixels = np.sum(cloud_data == 1)  # 1 means cloudy
             cloud_percentage = (cloud_pixels / total_pixels) * 100
-
             print(f"  Cloud coverage: {cloud_percentage:.2f}%")
 
-            # Calculate bad quality percentage
+            # bad quality percentage
             quality_mask = np.isin(qc_data, good_quality).astype(int)
             bad_pixels = np.sum(quality_mask == 0)
             bad_percentage = (bad_pixels / total_pixels) * 100
-
             print(f"  Bad quality: {bad_percentage:.2f}%")
 
-            # Check if date passes both filters
             if cloud_percentage <= max_cloud_percentage and bad_percentage <= max_bad_percentage:
                 filtered_dates.append(date)
-
-                # Create combined mask: 1 where clear AND good quality, 0 otherwise
                 combined_mask = (cloud_data == 0) & (quality_mask == 1)
                 date_masks[date] = combined_mask.astype(int)
-
                 print(f"  -> ACCEPTED")
             else:
                 reasons = []
@@ -194,7 +165,6 @@ def filter_dates_by_quality(grouped_files, max_cloud_percentage=10, max_bad_perc
                 if bad_percentage > max_bad_percentage:
                     reasons.append(f"bad quality {bad_percentage:.1f}% > {max_bad_percentage}%")
                 print(f"  -> REJECTED ({', '.join(reasons)})")
-
         except Exception as e:
             print(f"  -> ERROR processing date {date}: {e}")
             continue
@@ -204,28 +174,17 @@ def filter_dates_by_quality(grouped_files, max_cloud_percentage=10, max_bad_perc
 
 def load_combined_thermal_data_filtered(grouped_files, filtered_dates):
     """
-    Load and combine LST and EmisWB data for filtered dates.
-
-    Args:
-        grouped_files: Dictionary of files grouped by date
-        filtered_dates: List of dates that passed quality filtering
-
-    Returns:
-        combined_data: List of 2-channel thermal arrays (LST + EmisWB)
+    Combine the LST and EmisWB data for filtered dates.
     """
     combined_data = []
 
     for date in filtered_dates:
         files = grouped_files[date]
-
-        # Load LST data
         with rasterio.open(files['lst']) as lst_src:
             lst_data = lst_src.read(1)
 
-        # Load EmisWB data and resample to match LST grid
+        # EmisWB resampled to LST - 2 channels for thermal datasets
         emiswb_data = resample_to_match(files['emiswb'], files['lst'])
-
-        # Stack as 2-channel array (channels first: [2, height, width])
         thermal_combined = np.stack([lst_data, emiswb_data], axis=0)
         combined_data.append(thermal_combined)
 
@@ -235,9 +194,8 @@ def load_combined_thermal_data_filtered(grouped_files, filtered_dates):
 def create_thermal_dataset(thermal_data_list, quality_masks, mask_file, window_size=64, stride=64,
                            directory="./data_thermal"):
     """
-    Create dataset by windowing thermal images and applying quality masks.
+    Manage dataset through windowing thermal images and applying quality mask.
     """
-    # Create output directories
     os.makedirs(f"{directory}/thermal", exist_ok=True)
     os.makedirs(f"{directory}/mask", exist_ok=True)
 
@@ -246,67 +204,42 @@ def create_thermal_dataset(thermal_data_list, quality_masks, mask_file, window_s
 
     for idx, (thermal_array, quality_mask) in enumerate(zip(thermal_data_list, quality_masks)):
         print(f"Processing thermal image {idx + 1} of {total_images}")
-
-        # Get dimensions
         n_bands, height, width = thermal_array.shape
-
-        # Traverse with sliding window
         x_ind = 0
         while x_ind < (height - window_size):
             y_ind = 0
             while y_ind < (width - window_size):
-                save_thermal_window(x_ind, y_ind, window_size, image_counter,
-                                    thermal_array, quality_mask, mask_file,
-                                    n_bands, directory)
+                save_thermal_window(x_ind, y_ind, window_size, image_counter, thermal_array, quality_mask, mask_file, n_bands, directory)
                 image_counter += 1
                 y_ind += stride
             x_ind += stride
-
     print(f"Created {image_counter} thermal windows")
 
 
 def save_thermal_window(x_ind, y_ind, window_size, image_id, thermal_array, quality_mask,
                         mask_file, n_bands, directory):
     """
-    Save a windowed thermal image and corresponding mask.
+    Windowed thermal image and corresponding mask.
     """
-    # Create window
     window = Window(y_ind, x_ind, window_size, window_size)
-
-    # Extract thermal window
     thermal_window = thermal_array[:, x_ind:x_ind + window_size, y_ind:y_ind + window_size]
-
-    # Extract quality mask window
     quality_window = quality_mask[x_ind:x_ind + window_size, y_ind:y_ind + window_size]
 
-    # Apply quality mask to thermal data (set bad quality pixels to 0)
+    # Quality application on thermal data
     for band in range(n_bands):
         thermal_window[band] = thermal_window[band] * quality_window
-
-    # Check if window is valid (at least 25% good quality pixels)
+    # Validity of window - has to be more than 25%
     valid_pixel_ratio = np.sum(quality_window) / (window_size * window_size)
     if valid_pixel_ratio < 0.25:
         return
 
     try:
-        # Extract geology mask window
+        # Geology mask window
         with rasterio.open(mask_file) as mask_raster:
             mask_window_data = mask_raster.read(window=window)
-            if image_id < 5:  # Only for first few windows
-                print(
-                    f"Window {image_id}: thermal coords ({x_ind}:{x_ind + window_size}, {y_ind}:{y_ind + window_size})")
-                print(
-                    f"  Mask coords ({window.row_off}:{window.row_off + window.height}, {window.col_off}:{window.col_off + window.width})")  # Add this
-                print(f"  Thermal window shape: {thermal_window.shape}")
-                print(f"  Mask window shape: {mask_window_data.shape}")
-
-                # Add actual coordinate comparison
-                print(f"  Coordinates match: {x_ind == window.row_off and y_ind == window.col_off}")  # Add this
-        # Skip if geology mask is invalid
         if np.any(mask_window_data == -999):
             return
 
-        # Save thermal window
         thermal_profile = {
             'driver': 'GTiff',
             'dtype': thermal_window.dtype,
@@ -319,7 +252,6 @@ def save_thermal_window(x_ind, y_ind, window_size, image_id, thermal_array, qual
         with rasterio.open(thermal_path, 'w', **thermal_profile) as thermal_out:
             thermal_out.write(thermal_window)
 
-        # Save geology mask window
         mask_profile = {
             'driver': 'GTiff',
             'dtype': mask_window_data.dtype,
@@ -337,21 +269,18 @@ def save_thermal_window(x_ind, y_ind, window_size, image_id, thermal_array, qual
 
 
 def load_thermal_data(thermal_path, mask_path):
-    """Load and return sorted lists of thermal and mask TIFF filenames."""
+    """Sorted lists of thermal and mask TIFF filenames."""
     thermal_files = []
     mask_files = []
 
-    # Get thermal files
     for file in os.listdir(thermal_path):
         if file.endswith('.tif'):
             thermal_files.append(file)
-
-    # Get mask files
     for file in os.listdir(mask_path):
         if file.endswith('.tif'):
             mask_files.append(file)
 
-    # Sort to ensure correspondence
+    # Correspondence by sorting
     thermal_files.sort()
     mask_files.sort()
 
@@ -360,29 +289,27 @@ def load_thermal_data(thermal_path, mask_path):
 
 def preprocess_thermal_data(thermal_files, mask_files, target_shape_thermal, target_shape_mask,
                             thermal_path, mask_path):
-    """Load and preprocess thermal images and masks for model training."""
-    # Get dimensions
+    """Preprocess everything for training in models."""
+    # Dimensions
     m = len(thermal_files)
     t_h, t_w, t_c = target_shape_thermal
     m_h, m_w, m_c = target_shape_mask
 
-    # Initialize arrays
     X = np.zeros((m, t_h, t_w, t_c), dtype=np.float32)
     y = np.zeros((m, m_h, m_w, m_c), dtype=np.int32)
 
-    # Process each thermal image and corresponding mask
+    # Thermal images and corresponding masks
     for idx, thermal_file in enumerate(thermal_files):
-        # Load thermal image
         thermal_path_full = os.path.join(thermal_path, thermal_file)
         thermal_image = tifffile.imread(thermal_path_full)
 
-        # Reshape thermal image
+        # Reshaping
         if len(thermal_image.shape) == 3:
             thermal_image = np.transpose(thermal_image, (1, 2, 0))
         thermal_image = np.reshape(thermal_image, (t_h, t_w, t_c))
         X[idx] = thermal_image
 
-        # Load corresponding mask
+        # Corresponding mask
         mask_file = mask_files[idx]
         mask_path_full = os.path.join(mask_path, mask_file)
         mask_image = Image.open(mask_path_full)
@@ -394,19 +321,18 @@ def preprocess_thermal_data(thermal_files, mask_files, target_shape_thermal, tar
 
 
 def split_and_normalize_thermal_data(X, y, test_size=0.15, validation_size=0.15, random_state=42):
-    """Split thermal dataset and normalize thermal data."""
-    # Initial split: separate test set
+    """Splitting and normalizing thermal data."""
+    # Test set
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=test_size, random_state=random_state
     )
 
-    # Split training into train and validation
+    # Test and Validating sets
     val_size_relative = validation_size / (1 - test_size)
     X_train, X_valid, y_train, y_valid = train_test_split(
         X_train, y_train, test_size=val_size_relative, random_state=random_state
     )
 
-    # Print dataset statistics
     count_label = np.count_nonzero(y_test < 25)
     count_no_data = np.count_nonzero(y_test == 25)
     total_pixels = np.count_nonzero(y_test)
@@ -420,7 +346,7 @@ def split_and_normalize_thermal_data(X, y, test_size=0.15, validation_size=0.15,
     print(f'  X_valid: {X_valid.shape}, y_valid: {y_valid.shape}')
     print(f'  X_test: {X_test.shape}, y_test: {y_test.shape}')
 
-    # Convert no-data values to 0 in masks
+    # No-data to 0 in masks
     for i in range(y_train.shape[0]):
         y_train[i, :, :] = tf.where(y_train[i, :, :] == 25, 0, y_train[i, :, :])
     for i in range(y_valid.shape[0]):
@@ -428,44 +354,35 @@ def split_and_normalize_thermal_data(X, y, test_size=0.15, validation_size=0.15,
     for i in range(y_test.shape[0]):
         y_test[i, :, :] = tf.where(y_test[i, :, :] == 25, 0, y_test[i, :, :])
 
-    # Normalize thermal data band by band
+    # Normalizing
     print("Normalizing thermal data...")
-
     for band in range(X_train.shape[3]):
         print(f"Processing band {band + 1}/{X_train.shape[3]}")
-
-        # Get statistics from training data only
         train_band_data = X_train[:, :, :, band].flatten()
-
-        # Remove zero values AND NaN values for normalization statistics
+        # Remove zero values AND NaN values
         valid_pixels = train_band_data[(train_band_data != 0) & (~np.isnan(train_band_data))]
 
         if len(valid_pixels) > 0:
-            # Use min-max normalization
+            # Min-max normalization
             min_val = np.min(valid_pixels)
             max_val = np.max(valid_pixels)
-
             print(f"  Band {band + 1}: min={min_val:.2f}, max={max_val:.2f}, valid_pixels={len(valid_pixels)}")
-
             if max_val != min_val:
-                # Create mask for valid pixels (not zero and not NaN)
+                # mask for valid pixels
                 train_mask = (X_train[:, :, :, band] != 0) & (~np.isnan(X_train[:, :, :, band]))
                 valid_mask = (X_valid[:, :, :, band] != 0) & (~np.isnan(X_valid[:, :, :, band]))
                 test_mask = (X_test[:, :, :, band] != 0) & (~np.isnan(X_test[:, :, :, band]))
 
-                # Normalize and set invalid pixels to 0
-                X_train[:, :, :, band] = np.where(train_mask, (X_train[:, :, :, band] - min_val) / (max_val - min_val),
-                                                  0)
-                X_valid[:, :, :, band] = np.where(valid_mask, (X_valid[:, :, :, band] - min_val) / (max_val - min_val),
-                                                  0)
+                # Normalizing and invalid pixels to 0
+                X_train[:, :, :, band] = np.where(train_mask, (X_train[:, :, :, band] - min_val) / (max_val - min_val), 0)
+                X_valid[:, :, :, band] = np.where(valid_mask, (X_valid[:, :, :, band] - min_val) / (max_val - min_val), 0)
                 X_test[:, :, :, band] = np.where(test_mask, (X_test[:, :, :, band] - min_val) / (max_val - min_val), 0)
             else:
-                print(f"  Warning: Band {band + 1} has constant values")
+                print(f"  Band {band + 1} has constant values")
                 X_train[:, :, :, band] = np.where(~np.isnan(X_train[:, :, :, band]), X_train[:, :, :, band], 0)
                 X_valid[:, :, :, band] = np.where(~np.isnan(X_valid[:, :, :, band]), X_valid[:, :, :, band], 0)
                 X_test[:, :, :, band] = np.where(~np.isnan(X_test[:, :, :, band]), X_test[:, :, :, band], 0)
 
-            # Add this after the normalization loop completes
             print("\nPost-normalization statistics:")
             for band in range(X_train.shape[3]):
                 band_data = X_train[:, :, :, band]
@@ -473,32 +390,19 @@ def split_and_normalize_thermal_data(X, y, test_size=0.15, validation_size=0.15,
                 if len(valid_data) > 0:
                     print(f"  Band {band + 1} normalized: min={np.min(valid_data):.4f}, max={np.max(valid_data):.4f}")
         else:
-            print(f"  Warning: Band {band + 1} has no valid pixels, setting all to 0")
+            print(f"  Band {band + 1} has no valid pixels, setting all to 0")
             X_train[:, :, :, band] = 0
             X_valid[:, :, :, band] = 0
             X_test[:, :, :, band] = 0
-
     print("Normalization complete!")
 
     return X_train, X_valid, X_test, y_train, y_valid, y_test
 
 
-def process_ecostress_thermal_data(data_dir, mask_file, target_shape_thermal=(64, 64, 2),
-                                   target_shape_mask=(64, 64, 1), max_cloud_percentage=10,
-                                   max_bad_percentage=10):
+def process_ecostress_thermal_data(data_dir, mask_file, target_shape_thermal=(64, 64, 2), target_shape_mask=(64, 64, 1),
+                                   max_cloud_percentage=10, max_bad_percentage=10):
     """
     Complete pipeline for processing ECOSTRESS thermal data.
-
-    Args:
-        data_dir: Directory containing all ECOSTRESS files
-        mask_file: Path to geology mask file
-        target_shape_thermal: Target shape for thermal windows (LST + EmisWB = 2 channels)
-        target_shape_mask: Target shape for mask windows
-        max_cloud_percentage: Maximum allowed cloud coverage percentage
-        max_bad_percentage: Maximum allowed bad quality percentage
-
-    Returns:
-        Processed and split dataset ready for training
     """
 
     print("Step 1: Grouping files by date...")
@@ -506,9 +410,7 @@ def process_ecostress_thermal_data(data_dir, mask_file, target_shape_thermal=(64
     print(f"Found {len(grouped_files)} unique dates")
 
     print("\nStep 2: Filtering dates by quality...")
-    filtered_dates, date_masks = filter_dates_by_quality(
-        grouped_files, max_cloud_percentage, max_bad_percentage
-    )
+    filtered_dates, date_masks = filter_dates_by_quality(grouped_files, max_cloud_percentage, max_bad_percentage)
     print(f"Selected {len(filtered_dates)} dates after quality filtering")
 
     if len(filtered_dates) == 0:
@@ -528,8 +430,7 @@ def process_ecostress_thermal_data(data_dir, mask_file, target_shape_thermal=(64
     thermal_list, mask_list = load_thermal_data("./data_thermal/thermal", "./data_thermal/mask")
 
     print("\nStep 6: Preprocessing data...")
-    X, y = preprocess_thermal_data(thermal_list, mask_list, target_shape_thermal,
-                                   target_shape_mask, "./data_thermal/thermal", "./data_thermal/mask")
+    X, y = preprocess_thermal_data(thermal_list, mask_list, target_shape_thermal, target_shape_mask, "./data_thermal/thermal", "./data_thermal/mask")
     print(f"Debug: NaN count in X: {np.sum(np.isnan(X))}")
     print(f"Debug: Zero count in X: {np.sum(X == 0)}")
     print(f"Debug: Total pixels in X: {X.size}")
@@ -537,14 +438,14 @@ def process_ecostress_thermal_data(data_dir, mask_file, target_shape_thermal=(64
     print("\nStep 7: Splitting and normalizing data...")
     X_train, X_valid, X_test, y_train, y_valid, y_test = split_and_normalize_thermal_data(X, y)
     print(f"\nFinal dataset shapes:")
-    print(f"Thermal data (X): {X_train.shape}")  # Should be (samples, 64, 64, 2)
-    print(f"Mask data (y): {y_train.shape}")  # Should be (samples, 64, 64, 1)
+    print(f"Thermal data (X): {X_train.shape}")  # (samples, 64, 64, 2)
+    print(f"Mask data (y): {y_train.shape}")  # (samples, 64, 64, 1)
     print(f"\nCNN compatibility: {'✓' if len(X_train.shape) == 4 else '✗'}")
     print(
         f"ConvLSTM compatibility: {'✗ - needs (samples, timesteps, height, width, channels)' if len(X_train.shape) == 4 else '✓'}")
 
     print("\nStep 8: Saving processed dataset...")
-    save_dir = "C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Outputs/Villoslada"
+    save_dir = "C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Outputs/Santa"
     os.makedirs(save_dir, exist_ok=True)
     np.save(os.path.join(save_dir, 'X_train.npy'), X_train)
     np.save(os.path.join(save_dir, 'X_valid.npy'), X_valid)
@@ -558,6 +459,7 @@ def process_ecostress_thermal_data(data_dir, mask_file, target_shape_thermal=(64
 
 
 X_train, X_valid, X_test, y_train, y_valid, y_test = process_ecostress_thermal_data(
-    data_dir="C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Villoslada_full/",
-    mask_file="C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Masks/Geo_map_resized_Vill.tif"
-)
+    data_dir="C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/THERMAL/Santa_full/",
+    mask_file="C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Masks/Santa Olalla masks/Geo_map_resized_Santa.tif")
+
+

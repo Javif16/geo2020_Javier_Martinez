@@ -1,30 +1,18 @@
 ﻿'''
-This file will contain the main Convolutional Neural Network, with which thermal image
-classification will be performed and achieved.
+Thermal data:
+This file will contain the main Convolutional Neural Network, with which thermal image classification will be performed
+and achieved.
+Here, the program will also be trained and tested, with parameter tunning taking place here as well.
 
-Here, the program will also be trained and tested, with parameter tunning taking place
-here as well.
-
-It will be able to work both with a single image or a set of thermal iamges.
-
-Extraction will be tested with different architectures to improve efficiency (ResNet
-blocks) and batch normalization.
-
-The program should output the  correct identification of different rock and soil types
-when presented with either a single or a set of thermal images.
-'''
-from typing import List, Any
-
-# GEOLOGICAL MAPS
-'''
+Geological Maps:
 · Pre-labelled geological maps
 · Converted into segmentation greyscale masks matching the input shape of images in the CNN with same CRS
-· Each pixel corresponds to a specific class (rock/soil) with numbers (loam=1, peat=2, silt=3, etc.)
+· Each pixel corresponds to a specific class (rock/soil) with numbers (sand=1, clay=2, chalk=3, etc.)
 
 Evaluation:
     - overlay output of models over the geological maps and compare pixel by pixel
-    - IoU and Dice Coefficient inside model (during training)
-    - Confusion matrix and Accuracy outside of model'''
+    - Accuracy, F1 score, IoU inside model (during training)
+'''
 
 import numpy as np
 import os
@@ -65,7 +53,7 @@ y_train = np.load(data_path + 'y_train.npy')
 y_valid = np.load(data_path + 'y_valid.npy')
 y_test = np.load(data_path + 'y_test.npy')
 
-# Cleaning for rgb and sar
+# Cleaning for RGB and SAR
 X_train[:, :, :, 2:7] = np.nan_to_num(X_train[:, :, :, 2:7], nan=0.0)
 X_valid[:, :, :, 2:7] = np.nan_to_num(X_valid[:, :, :, 2:7], nan=0.0)
 X_test[:, :, :, 2:7] = np.nan_to_num(X_test[:, :, :, 2:7], nan=0.0)
@@ -75,37 +63,22 @@ for channel in range(X_train.shape[-1]):
     total = channel_data.size
     print(f"Channel {channel}: {nan_count}/{total} NaN values ({nan_count/total*100:.2f}%)")
 
+# for training with only thermal data in SAR and RGB tests
 #X_train = X_train[:, :, :, :2]
 #X_valid = X_valid[:, :, :, :2]
 #X_test = X_test[:, :, :, :2]
-
-print("Dataset loaded successfully!")
-print(f"X_train shape: {X_train.shape}")
-print(f"y_train shape: {y_train.shape}")
-print(f"X_valid shape: {X_valid.shape}")
-print(f"y_valid shape: {y_valid.shape}")
-print(f"X_test shape: {X_test.shape}")
-print(f"y_test shape: {y_test.shape}")
 
 
 # -------------- CNN U-Net ---------------------------------------------------------------------------------------------
 def unet_model(size_input=(64, 64, 2), filters_base=16, classes=14, l2_reg=0.01):
     '''
     U-Net architecture with encoder and decoder.
-    :param size_input: Tuple, input size of the image (height, width, channels).
-    :param filters: Nº of filters in the first convolutional layer.
-    :param classes: Nº of output classes.
-    :param l2_reg: L2 regularization factor to apply to all Conv2D layers.
-    :return: Compiled U-Net model.
     '''
     # Encoder
     def Encoder(inputs, filters, dropout, l2factor, max_pooling=True):
         '''
-        Uses convolutional and pooling layers, in tandem with ReLU activation function to learn.
+        Convolutional and pooling layers, in tandem with ReLU activation function to learn.
         Dropout additional to prevent overfitting problems.
-        :return:
-        Activation function values for next layer.
-        Skip connection used in the decoder.
         '''
         # 2 convolutional layers with ReLU and HeNormal initialization
         # Proper initialization to prevent gradient problems
@@ -144,10 +117,8 @@ def unet_model(size_input=(64, 64, 2), filters_base=16, classes=14, l2_reg=0.01)
 
     def Decoder(previous_layer, skip, filters, l2factor):
         '''
-        Uses transpose convolutions to make images bigger (upscale) back to original size and merges with skip layer from Encoder.
+        Transpose convolutions to make images bigger (upscale) back to original size and merges with skip layer from Encoder.
         2 convolutional layers with 'same' padding increases depth of architecture for better predictions.
-        :return:
-        Decoded layer output.
         '''
         # increasing size
         upscale = Conv2DTranspose(filters, (3, 3), strides=(2, 2), padding='same')(previous_layer)
@@ -211,14 +182,11 @@ def unet_model(size_input=(64, 64, 2), filters_base=16, classes=14, l2_reg=0.01)
 
 # -------------- LOSS FUNCTION ---------------------------------------------------------------------------------
 def simple_weighted_loss(class_weights):
-    """Much simpler weighted loss function"""
-
     def loss_fn(y_true, y_pred):
-        # Convert to sparse categorical crossentropy with class weights
         y_true = tf.squeeze(y_true, axis=-1)  # [4,64,64,1] -> [4,64,64]
         loss = tf.keras.losses.sparse_categorical_crossentropy(y_true, y_pred)
 
-        # Apply class weights
+        # Class weights
         sample_weights = tf.gather([
             class_weights.get(0, 1.0), class_weights.get(1, 1.0), class_weights.get(2, 1.0),
             class_weights.get(3, 1.0), class_weights.get(4, 1.0), class_weights.get(5, 1.0),
@@ -254,7 +222,7 @@ class EpochTracker(tf.keras.callbacks.Callback):
         print(f"Will store predictions for epochs: {self.epochs_to_store}")
 
     def _get_epochs_to_store(self):
-        """Define which epochs to store predictions for"""
+        """Epochs from which to store predictions."""
         if self.total_epochs < 6:
             return list(range(1, self.total_epochs + 1))
         else:
@@ -275,68 +243,52 @@ class EpochTracker(tf.keras.callbacks.Callback):
             batch_pred = self.model.predict(batch_X, verbose=0, batch_size=4)
             predictions_list.append(batch_pred)
 
-        # Concatenate all predictions
         predictions = np.concatenate(predictions_list, axis=0)
-
-        # Convert to class indices for metrics
         pred_classes = np.argmax(predictions, axis=-1)
-
-        # Compute metrics with per-class details
         metrics = self.compute_metrics_fn(self.y_test, pred_classes)
 
-        # Always store metrics (lightweight)
         self.epoch_metrics.append(metrics)
 
-        # Only store predictions for selected epochs (memory intensive)
         if current_epoch in self.epochs_to_store:
             print(f"→ Storing predictions for epoch {current_epoch} (selected epoch)")
             self.selected_epoch_predictions[current_epoch] = pred_classes.copy()
             self.selected_epoch_metrics[current_epoch] = metrics.copy()
 
-        # Print training metrics from logs
         if logs:
             print(f"\nTraining Metrics:")
             print(f"Loss: {logs.get('loss', 'N/A'):.4f} | Val Loss: {logs.get('val_loss', 'N/A'):.4f}")
             print(f"Accuracy: {logs.get('accuracy', 'N/A'):.4f} | Val Accuracy: {logs.get('val_accuracy', 'N/A'):.4f}")
 
-        # Print summary
         print(f"\nTest Set Performance Summary:")
         print(f"Overall Accuracy: {metrics['accuracy']:.4f}")
         print(f"Mean IoU (excluding background): {metrics['mean_iou']:.4f}")
         print(f"Mean IoU (all classes): {metrics['mean_iou_all']:.4f}")
 
-        # Show worst and best performing classes
         if 'per_class_iou' in metrics:
             iou_items = list(metrics['per_class_iou'].items())
-            iou_items.sort(key=lambda x: x[1])  # Sort by IoU score
+            iou_items.sort(key=lambda x: x[1])
 
             print(f"\nWorst performing classes:")
-            for class_name, iou in iou_items[:3]:  # Show 3 worst
+            for class_name, iou in iou_items[:3]:
                 print(f"  {class_name}: {iou:.4f}")
 
             print(f"\nBest performing classes:")
-            for class_name, iou in iou_items[-3:]:  # Show 3 best
+            for class_name, iou in iou_items[-3:]:
                 print(f"  {class_name}: {iou:.4f}")
-
         print(f"{'=' * 60}\n")
 
-        # Memory cleanup
         del predictions, pred_classes
         import gc
         gc.collect()
 
     def get_class_performance_summary(self):
-        """Get a summary of class performance across all epochs"""
+        """Summary of class performance across all epochs"""
         if not self.epoch_metrics:
             return None
-
-        # Get the latest epoch metrics
         latest_metrics = self.epoch_metrics[-1]
-
         if 'per_class_iou' not in latest_metrics:
             return None
 
-        # Sort classes by performance
         iou_items = list(latest_metrics['per_class_iou'].items())
         iou_items.sort(key=lambda x: x[1], reverse=True)
 
@@ -348,22 +300,20 @@ class EpochTracker(tf.keras.callbacks.Callback):
 
 
 # -------------- TRAINING & EVALUATION ---------------------------------------------------------------------------------
-def train_model(X_train, y_train, X_val, y_val, X_test, y_test, use_optuna=True, n_trials=30, epochs=100):
+def train_model(X_train, y_train, X_val, y_val, X_test, y_test, use_optuna=True, n_trials=30):
     """
-    Train and evaluate model with optional Optuna hyperparameter optimization
-    Enhanced to track predictions at each epoch for visualization
+    Training and evaluation of model with optional Optuna hyperparameter optimization.
     """
 
-    print("Starting model training...")
+    print("=== CNN U-Net Training ===")
     print(f"Training on {len(X_train)} images, validating on {len(X_val)} images, testing on {len(X_test)} images")
-
     if use_optuna:
         print("=== STARTING OPTUNA HYPERPARAMETER OPTIMIZATION ===")
 
         def objective(trial):
             tf.keras.backend.clear_session()
 
-            # Suggest hyperparameters
+            # HYPERPARAMETERS
             learning_rate = trial.suggest_float('learning_rate', 1e-5, 1e-3)
             batch_size = trial.suggest_categorical('batch_size', [4, 16, 32])
             dropout_rate = trial.suggest_float('dropout_rate', 0.1, 0.2)
@@ -371,14 +321,14 @@ def train_model(X_train, y_train, X_val, y_val, X_test, y_test, use_optuna=True,
             filters_base = trial.suggest_categorical('filters_base', [16, 32, 64])
 
             try:
-                # Create model with suggested hyperparameters
+                # MODEL
                 model = unet_model(
                     size_input=(64, 64, 5),
                     classes=14,
                     l2_reg=l2_reg,
                     filters_base=filters_base)
 
-                # Compile model
+                # OPTIMIZER and LOSS
                 optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
                 loss = tf.keras.losses.SparseCategoricalCrossentropy()
 
@@ -388,13 +338,13 @@ def train_model(X_train, y_train, X_val, y_val, X_test, y_test, use_optuna=True,
                     metrics=['accuracy', tf.keras.metrics.SparseCategoricalAccuracy()]
                 )
 
-                # Callbacks for optimization
+                # CALLBACK
                 early_stopping = tf.keras.callbacks.EarlyStopping(
                     monitor='val_loss', patience=5, restore_best_weights=True, verbose=0
                 )
                 pruning_callback = optuna.integration.TFKerasPruningCallback(trial, 'val_loss')
 
-                # Train with reduced epochs for optimization
+                # TRAINING
                 history = model.fit(
                     X_train, y_train,
                     validation_data=(X_val, y_val),
@@ -411,7 +361,6 @@ def train_model(X_train, y_train, X_val, y_val, X_test, y_test, use_optuna=True,
                 print(f"Trial failed: {e}")
                 return float('inf')
 
-        # Run optimization
         study = optuna.create_study(direction='minimize')
         study.optimize(objective, n_trials=n_trials)
 
@@ -419,23 +368,19 @@ def train_model(X_train, y_train, X_val, y_val, X_test, y_test, use_optuna=True,
         print(f"Best parameters: {best_params}")
 
     else:
-        # Use default parameters
+        # Base params
         best_params = {
             'learning_rate': 0.0001,
             'l2_reg': 0.05,
             'batch_size': 4,
             'filters_base': 16
         }
-        # lr - 0.001 = better for 1 epoch
-        # lr - 0.0001 = better for 20 epochs
-        print("=== USING DEFAULT PARAMETERS (NO OPTUNA) ===")
+        print("=== USING BASE PARAMETERS (NO OPTUNA) ===")
 
-    print("\n=== TRAINING FINAL MODEL WITH EPOCH TRACKING ===")
-
-    # Train final model with best/default parameters
+    print("\n=== TRAINING FINAL MODEL ===")
     tf.keras.backend.clear_session()
 
-    # Create final model
+    # MODEL
     model = unet_model(
         size_input=(64, 64, 2),
         filters_base=best_params['filters_base'],
@@ -464,7 +409,7 @@ def train_model(X_train, y_train, X_val, y_val, X_test, y_test, use_optuna=True,
     # Santa Olalla - 1, 3, 4, 7, 8, 9, 10, 11, 12
     # Villoslada - 1, 2, 4, 5, 7, 8
 
-    # Compile with optimized parameters
+    # OPTIMIZER AND LOSS
     optimizer = tf.keras.optimizers.Adam(learning_rate=best_params['learning_rate'])
     loss = tf.keras.losses.SparseCategoricalCrossentropy()
     # loss = simple_weighted_loss(class_weights)
@@ -475,10 +420,10 @@ def train_model(X_train, y_train, X_val, y_val, X_test, y_test, use_optuna=True,
         metrics=['accuracy', tf.keras.metrics.SparseCategoricalAccuracy()]
     )
 
-    # Initialize the tracker
+    # TRACKER
     epoch_tracker = EpochTracker(X_test, y_test, compute_metrics, show_per_class=True)
 
-    # Other callbacks
+    # CALLBACKS
     lr_callback = tf.keras.callbacks.ReduceLROnPlateau(
         monitor='val_loss',
         factor=0.5,
@@ -491,7 +436,7 @@ def train_model(X_train, y_train, X_val, y_val, X_test, y_test, use_optuna=True,
         patience=7,
         restore_best_weights=True)
 
-    # Training with epoch tracking
+    # TRAINING
     print("Training final CNN model...")
     history = model.fit(
         X_train, y_train,
@@ -502,7 +447,6 @@ def train_model(X_train, y_train, X_val, y_val, X_test, y_test, use_optuna=True,
         verbose=1
     )
 
-    # Final evaluation
     print("\n=== FINAL EVALUATION ===")
     test_loss, test_acc, test_sparse_acc = model.evaluate(X_test, y_test, batch_size=4, verbose=0)
     print(f"Test loss: {test_loss}")
@@ -537,15 +481,9 @@ def train_model(X_train, y_train, X_val, y_val, X_test, y_test, use_optuna=True,
 # -------------- PERFORMANCE -------------------------------------------------------------------------------------------
 def compute_metrics(y_true, y_pred, class_names=None, print_results=True):
     """
-    Compute metrics for segmentation task
-    Args:
-        y_true: Ground truth one-hot encoded labels (samples, height, width, classes)
-        y_pred: Model predictions as probabilities (samples, height, width, classes)
+    Metric computation for segmentation.
     """
     print("Computing metrics for full images...")
-    # Convert predictions to class indices if they're probabilities
-    # Flatten for metric calculation
-    # Flatten arrays if they're not already
     if len(y_true.shape) > 1:
         y_true_flat = y_true.flatten()
     else:
@@ -556,14 +494,11 @@ def compute_metrics(y_true, y_pred, class_names=None, print_results=True):
     else:
         y_pred_flat = y_pred
 
-    # Get unique classes present in the data
     unique_classes = np.unique(np.concatenate([y_true_flat, y_pred_flat]))
     n_classes = len(unique_classes)
 
-    # Compute confusion matrix
+    # Confusion matrix
     cm = confusion_matrix(y_true_flat, y_pred_flat, labels=unique_classes)
-
-    # Calculate per-class IoU
     per_class_iou = {}
     iou_scores = []
 
@@ -574,30 +509,25 @@ def compute_metrics(y_true, y_pred, class_names=None, print_results=True):
         fn = cm[i, :].sum() - tp  # False negatives
 
         if tp + fp + fn == 0:
-            iou = 0.0  # Handle case where class doesn't appear
+            iou = 0.0
         else:
             iou = tp / (tp + fp + fn)
 
         class_name = class_names[class_id] if class_names else f"Class_{class_id}"
         per_class_iou[class_name] = iou
         iou_scores.append(iou)
-
         if print_results:
             print(f"{class_name} (ID: {class_id}): IoU = {iou:.4f} | TP={tp}, FP={fp}, FN={fn}")
 
-    # Calculate F1 scores
     # Macro F1 (average of per-class F1 scores)
     f1_macro = f1_score(y_true_flat, y_pred_flat, labels=unique_classes, average='macro')
-
     # Weighted F1 (weighted by support)
     f1_weighted = f1_score(y_true_flat, y_pred_flat, labels=unique_classes, average='weighted')
-
-    # Per-class F1 scores
+    # Per-class F1 score
     f1_per_class = f1_score(y_true_flat, y_pred_flat, labels=unique_classes, average=None)
 
-    # Calculate mean IoU (excluding background class 0 if present)
+    # Mean IoU
     if 0 in unique_classes and len(unique_classes) > 1:
-        # Exclude background class from mean IoU calculation
         non_bg_ious = [iou for i, iou in enumerate(iou_scores) if unique_classes[i] != 0]
         mean_iou = np.mean(non_bg_ious) if non_bg_ious else 0.0
         mean_iou_all = np.mean(iou_scores)
@@ -605,7 +535,6 @@ def compute_metrics(y_true, y_pred, class_names=None, print_results=True):
         mean_iou = np.mean(iou_scores)
         mean_iou_all = mean_iou
 
-    # Overall accuracy
     accuracy = np.sum(y_true_flat == y_pred_flat) / len(y_true_flat)
 
     if print_results:
@@ -633,12 +562,14 @@ def compute_metrics(y_true, y_pred, class_names=None, print_results=True):
         'f1_per_class': f1_per_class
     }
 
+
 from tensorflow.keras import backend as K
+
+
 def f1_score_keras(y_true, y_pred):
     """
     F1 score metric for Keras - works with multi-class segmentation
     """
-
     def recall_m(y_true, y_pred):
         true_positives = K.sum(K.round(K.clip(y_true * y_pred, 0, 1)))
         possible_positives = K.sum(K.round(K.clip(y_true, 0, 1)))
@@ -658,19 +589,17 @@ def f1_score_keras(y_true, y_pred):
 
 def plot_training(history):
     """
-    Enhanced plotting function that includes F1 score if available
+    Plotting function.
     """
-    # Check what metrics are available in history
     available_metrics = list(history.history.keys())
     has_f1 = any('f1' in metric.lower() for metric in available_metrics)
 
-    # Determine number of subplots based on available metrics
     if has_f1:
         fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     else:
         fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
-    # Plot 1: Loss
+    # Loss
     axes[0].plot(history.history['loss'], label='Training Loss')
     if 'val_loss' in history.history:
         axes[0].plot(history.history['val_loss'], label='Validation Loss')
@@ -680,7 +609,7 @@ def plot_training(history):
     axes[0].legend()
     axes[0].grid(True)
 
-    # Plot 2: Accuracy
+    # Accuracy
     axes[1].plot(history.history['accuracy'], label='Training Accuracy')
     if 'val_accuracy' in history.history:
         axes[1].plot(history.history['val_accuracy'], label='Validation Accuracy')
@@ -690,7 +619,7 @@ def plot_training(history):
     axes[1].legend()
     axes[1].grid(True)
 
-    # Plot 3: F1 Score
+    # F1 Score
     if has_f1:
         f1_keys = [key for key in available_metrics if 'f1' in key.lower() and not key.startswith('val_')]
         val_f1_keys = [key for key in available_metrics if 'f1' in key.lower() and key.startswith('val_')]
@@ -701,54 +630,30 @@ def plot_training(history):
         for val_f1_key in val_f1_keys:
             axes[2].plot(history.history[val_f1_key],
                          label=f'Validation {val_f1_key.replace("val_", "").replace("_", " ").title()}')
-
         axes[2].set_title('Model F1 Score')
         axes[2].set_xlabel('Epoch')
         axes[2].set_ylabel('F1 Score')
         axes[2].legend()
         axes[2].grid(True)
-
     plt.tight_layout()
     plt.show()
 
 
-def visualize_cnn_results(X_test, y_test, predictions, num_patches=3, patch_indices=None,
-                          figsize=(20, 10), cmap_thermal='hot', cmap_segmentation='tab20'):
+def visualize_cnn_results(X_test, y_test, predictions, num_patches=3, patch_indices=None, figsize=(20, 10), cmap_thermal='hot', cmap_segmentation='tab20'):
     """
-    Visualize CNN results showing thermal images, ground truth labels, and predictions
-
-    Parameters:
-    -----------
-    X_test : numpy array, shape (n_samples, 64, 64, 2)
-        Test thermal images with 2 channels
-    y_test : numpy array, shape (n_samples, 64, 64, 1)
-        Ground truth segmentation labels
-    predictions : numpy array, shape (n_samples, 64, 64)
-        Model predictions
-    num_patches : int
-        Number of patches to visualize (default: 3)
-    patch_indices : list or None
-        Specific patch indices to visualize. If None, random patches are selected
-    figsize : tuple
-        Figure size (width, height)
-    cmap_thermal : str
-        Colormap for thermal images
-    cmap_segmentation : str
-        Colormap for segmentation maps
+    CNN results showing thermal images, ground truth labels, and predictions
     """
 
-    # Select patches to visualize
     if patch_indices is None:
         patch_indices = random.sample(range(len(X_test)), num_patches)
     else:
         num_patches = len(patch_indices)
 
-    # Create figure with subplots
+    # One column for each part: input, label and prediciton
     fig, axes = plt.subplots(num_patches, 3, figsize=figsize, constrained_layout=True)
     if num_patches == 1:
         axes = axes.reshape(1, -1)
 
-    # Set up colormap for segmentation (14 classes)
     if cmap_segmentation == 'tab20':
         colors = plt.cm.tab20(np.linspace(0, 1, 14))
         seg_cmap = ListedColormap(colors)
@@ -756,42 +661,35 @@ def visualize_cnn_results(X_test, y_test, predictions, num_patches=3, patch_indi
         seg_cmap = cmap_segmentation
 
     for i, patch_idx in enumerate(patch_indices):
-        # Get data for this patch
         thermal_image = X_test[patch_idx]
-        true_labels = y_test[patch_idx].squeeze()  # Remove channel dimension
+        true_labels = y_test[patch_idx].squeeze()
         pred_labels = predictions[patch_idx]
-
-        # Use first thermal channel for visualization (you can modify this)
         thermal_display = thermal_image[:, :, 1]
 
-        # Column 1: Thermal Image
+        # Thermal Image
         im1 = axes[i, 0].imshow(thermal_display, cmap=cmap_thermal, aspect='equal')
         axes[i, 0].set_title(f'Patch {patch_idx + 1}: Thermal Image')
         axes[i, 0].axis('off')
 
-        # Column 2: Ground Truth Labels
+        # Ground Truth Labels
         im2 = axes[i, 1].imshow(true_labels, cmap=seg_cmap, vmin=0, vmax=13, aspect='equal')
         axes[i, 1].set_title(f'Patch {patch_idx + 1}: Ground Truth')
         axes[i, 1].axis('off')
 
-        # Column 3: Predictions
+        # Predictions
         im3 = axes[i, 2].imshow(pred_labels, cmap=seg_cmap, vmin=0, vmax=13, aspect='equal')
         axes[i, 2].set_title(f'Patch {patch_idx + 1}: Predictions')
         axes[i, 2].axis('off')
 
-    # Add colorbars
-    # Thermal colorbar
     cbar1 = plt.colorbar(im1, ax=axes[:, 0].ravel().tolist(), shrink=0.8, aspect=20)
     cbar1.set_label('Thermal Intensity', rotation=270, labelpad=15)
 
-    # Segmentation colorbar
     cbar2 = plt.colorbar(im2, ax=axes[:, 1:].ravel().tolist(), shrink=0.8, aspect=20)
     cbar2.set_label('Class Labels', rotation=270, labelpad=15)
     cbar2.set_ticks(range(14))
 
     plt.show()
 
-    # Print accuracy and F1 for visualized patches
     print(f"\nMetrics for visualized patches:")
     for i, patch_idx in enumerate(patch_indices):
         true_labels = y_test[patch_idx].squeeze().flatten()
@@ -802,7 +700,6 @@ def visualize_cnn_results(X_test, y_test, predictions, num_patches=3, patch_indi
 
 
 # -------------- WORKFLOW ----------------------------------------------------------------------------------------------
-
 (model, history, predictions, best_params,
  epoch_predictions, epoch_metrics, all_epoch_metrics) = train_model(
     X_train, y_train,
@@ -846,6 +743,7 @@ for param_name, param_value in best_params.items():
 plot_training(history)
 
 visualize_cnn_results(X_test, y_test, predictions, figsize=(18, 10), patch_indices=[77, 134, 456])
+
 '''
 Maximum patch index:
     Villoslada:
@@ -878,8 +776,8 @@ Maximum patch index:
 '''
 
 
-model.save(os.path.join('models', 'CNN_categorical.keras'))  # Native Keras format
-model.save(os.path.join('models', 'CNN_categorical.h5'))     # HDF5 format for compatibility
+model.save(os.path.join('models', 'CNN_categorical.keras'))
+model.save(os.path.join('models', 'CNN_categorical.h5'))
 print("Model saved successfully!")
 
 print("\n=== TRAINING COMPLETE ===")
