@@ -399,8 +399,93 @@ def split_and_normalize_thermal_data(X, y, test_size=0.15, validation_size=0.15,
     return X_train, X_valid, X_test, y_train, y_valid, y_test
 
 
+def create_time_sequences_from_patches(X_train, X_valid, X_test, y_train, y_valid, y_test,
+                                       sequence_length=5, overlap=2, min_valid_frames=3):
+    """
+    Create time sequences from existing CNN patches for ConvLSTM training.
+
+    Args:
+        X_train, X_valid, X_test: CNN patch arrays (samples, height, width, channels)
+        y_train, y_valid, y_test: Corresponding mask arrays
+        sequence_length: Number of time steps in each sequence
+        overlap: Number of overlapping frames between consecutive sequences
+        min_valid_frames: Minimum number of non-zero frames required in a sequence
+
+    Returns:
+        ConvLSTM-compatible arrays: (samples, timesteps, height, width, channels)
+    """
+
+    def create_sequences_from_split(X_split, y_split, split_name):
+        """Helper function to create sequences from a data split"""
+        print(f"Creating {split_name} sequences...")
+
+        n_samples, height, width, channels = X_split.shape
+        stride = sequence_length - overlap
+
+        # Calculate number of possible sequences
+        n_sequences = max(0, (n_samples - sequence_length) // stride + 1)
+
+        if n_sequences == 0:
+            print(f"Warning: Not enough samples in {split_name} to create sequences")
+            return np.array([]).reshape(0, sequence_length, height, width, channels), \
+                np.array([]).reshape(0, height, width, 1)
+
+        # Initialize sequence arrays
+        X_sequences = []
+        y_sequences = []
+
+        valid_sequence_count = 0
+
+        for i in range(0, n_samples - sequence_length + 1, stride):
+            # Extract sequence
+            X_seq = X_split[i:i + sequence_length]  # (seq_len, h, w, c)
+            y_seq = y_split[i + sequence_length - 1]  # Use last frame's mask (h, w, 1)
+
+            # Quality check: count non-zero frames in sequence
+            valid_frames = 0
+            for frame_idx in range(sequence_length):
+                # Check if frame has meaningful data (not all zeros)
+                frame_sum = np.sum(X_seq[frame_idx])
+                if frame_sum > 0:
+                    valid_frames += 1
+
+            # Only keep sequences with enough valid frames
+            if valid_frames >= min_valid_frames:
+                X_sequences.append(X_seq)
+                y_sequences.append(y_seq)
+                valid_sequence_count += 1
+
+        if len(X_sequences) == 0:
+            print(f"Warning: No valid sequences found in {split_name}")
+            return np.array([]).reshape(0, sequence_length, height, width, channels), \
+                np.array([]).reshape(0, height, width, 1)
+
+        # Convert to numpy arrays
+        X_sequences = np.array(X_sequences)  # (n_seq, seq_len, h, w, c)
+        y_sequences = np.array(y_sequences)  # (n_seq, h, w, 1)
+
+        print(f"  {split_name}: {n_samples} patches → {valid_sequence_count} sequences")
+        print(f"  Shape: {X_sequences.shape}")
+
+        return X_sequences, y_sequences
+
+    # Create sequences for each split
+    X_train_seq, y_train_seq = create_sequences_from_split(X_train, y_train, "Training")
+    X_valid_seq, y_valid_seq = create_sequences_from_split(X_valid, y_valid, "Validation")
+    X_test_seq, y_test_seq = create_sequences_from_split(X_test, y_test, "Test")
+
+    print(f"\nConvLSTM sequence creation complete!")
+    print(f"Sequence length: {sequence_length}, Overlap: {overlap}")
+    print(f"Final shapes:")
+    print(f"  X_train_seq: {X_train_seq.shape}")
+    print(f"  X_valid_seq: {X_valid_seq.shape}")
+    print(f"  X_test_seq: {X_test_seq.shape}")
+
+    return X_train_seq, X_valid_seq, X_test_seq, y_train_seq, y_valid_seq, y_test_seq
+
+
 def process_ecostress_thermal_data(data_dir, mask_file, target_shape_thermal=(64, 64, 2), target_shape_mask=(64, 64, 1),
-                                   max_cloud_percentage=10, max_bad_percentage=10):
+                                   max_cloud_percentage=10, max_bad_percentage=10, sequence_length=5, overlap=2):
     """
     Complete pipeline for processing ECOSTRESS thermal data.
     """
@@ -441,25 +526,39 @@ def process_ecostress_thermal_data(data_dir, mask_file, target_shape_thermal=(64
     print(f"Thermal data (X): {X_train.shape}")  # (samples, 64, 64, 2)
     print(f"Mask data (y): {y_train.shape}")  # (samples, 64, 64, 1)
     print(f"\nCNN compatibility: {'✓' if len(X_train.shape) == 4 else '✗'}")
-    print(
-        f"ConvLSTM compatibility: {'✗ - needs (samples, timesteps, height, width, channels)' if len(X_train.shape) == 4 else '✓'}")
 
     print("\nStep 8: Saving processed dataset...")
     save_dir = "C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Outputs/Santa"
     os.makedirs(save_dir, exist_ok=True)
+    # CNN
     np.save(os.path.join(save_dir, 'X_train.npy'), X_train)
     np.save(os.path.join(save_dir, 'X_valid.npy'), X_valid)
     np.save(os.path.join(save_dir, 'X_test.npy'), X_test)
     np.save(os.path.join(save_dir, 'y_train.npy'), y_train)
     np.save(os.path.join(save_dir, 'y_valid.npy'), y_valid)
     np.save(os.path.join(save_dir, 'y_test.npy'), y_test)
-    print("Dataset saved as separate .npy files")
+    print("Dataset saved for CNN")
 
-    return X_train, X_valid, X_test, y_train, y_valid, y_test
+    print("\nStep 9: Saving ConvLSTM processed dataset...")
+    X_train_seq, X_valid_seq, X_test_seq, y_train_seq, y_valid_seq, y_test_seq = create_time_sequences_from_patches(
+        X_train, X_valid, X_test, y_train, y_valid, y_test, sequence_length=sequence_length, overlap=overlap)
+
+    # Save ConvLSTM data
+    np.save(os.path.join(save_dir, 'X_train_seq.npy'), X_train_seq)
+    np.save(os.path.join(save_dir, 'X_valid_seq.npy'), X_valid_seq)
+    np.save(os.path.join(save_dir, 'X_test_seq.npy'), X_test_seq)
+    np.save(os.path.join(save_dir, 'y_train_seq.npy'), y_train_seq)
+    np.save(os.path.join(save_dir, 'y_valid_seq.npy'), y_valid_seq)
+    np.save(os.path.join(save_dir, 'y_test_seq.npy'), y_test_seq)
+
+    return {'cnn': (X_train, X_valid, X_test, y_train, y_valid, y_test),
+            'convlstm': (X_train_seq, X_valid_seq, X_test_seq, y_train_seq, y_valid_seq, y_test_seq)}
 
 
-X_train, X_valid, X_test, y_train, y_valid, y_test = process_ecostress_thermal_data(
-    data_dir="C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/THERMAL/Santa_full/",
-    mask_file="C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Masks/Santa Olalla masks/Geo_map_resized_Santa.tif")
+results = process_ecostress_thermal_data(
+        data_dir="C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/THERMAL/Santa_full/",
+        mask_file="C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Masks/Santa Olalla masks/Geo_map_resized_Santa.tif",
+        sequence_length=5, overlap=2)
 
-
+X_train, X_valid, X_test, y_train, y_valid, y_test = results['cnn']
+X_train_seq, X_valid_seq, X_test_seq, y_train_seq, y_valid_seq, y_test_seq = results['convlstm']
