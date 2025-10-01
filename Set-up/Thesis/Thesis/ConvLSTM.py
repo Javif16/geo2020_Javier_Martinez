@@ -40,6 +40,8 @@ import pickle
 from math import ceil
 from collections import defaultdict
 
+from CNN import reconstruct_map_from_patches, get_map_size_from_path
+
 
 # -------------- LOADING DATA ------------------------------------------------------------------------------------------
 data_path = "C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Outputs/Puertollano/Puertollano_thermal_day/"
@@ -394,7 +396,7 @@ def train_evaluate_model(X_train, y_train, X_val, y_val, X_test, y_test, use_opt
     history = model.fit(
         X_train, y_train,
         validation_data=(X_val, y_val),
-        epochs=100,
+        epochs=1,
         batch_size=best_params['batch_size'],
         callbacks=[lr_callback, early_stopping, epoch_tracker],
         verbose=1
@@ -579,17 +581,21 @@ def plot_training(history):
     plt.show()
 
 
-def visualize_convlstm_results(X_test, y_test, predictions, num_patches=3, patch_indices=None, timestep_to_visualize=-1, figsize=(15, 5), cmap_thermal='hot', cmap_segmentation='tab20'):
+def visualize_convlstm_results(X_test_seq, y_test_seq, predictions_seq, data_path, positions_test_seq=None, num_patches=3,
+                               patch_indices=None, timestep_to_visualize=-1, figsize=(15, 5), cmap_thermal='hot',
+                               cmap_segmentation='tab20'):
     """
-    ConvLSTM results showing thermal images, ground truth labels, and predictions
+    Visualize ConvLSTM results showing:
+    1. Individual sequences (thermal images, ground truth labels, and predictions)
+    2. Reconstructed full maps (ground truth and predictions)
     """
+
     if patch_indices is None:
-        patch_indices = random.sample(range(len(X_test)), num_patches)
+        patch_indices = random.sample(range(len(X_test_seq)), num_patches)
     else:
         num_patches = len(patch_indices)
 
-    # One column for each part: input, label and prediciton
-    fig, axes = plt.subplots(num_patches, 3, figsize=figsize)
+    fig, axes = plt.subplots(num_patches, 3, figsize=figsize, constrained_layout=True)
     if num_patches == 1:
         axes = axes.reshape(1, -1)
 
@@ -600,14 +606,14 @@ def visualize_convlstm_results(X_test, y_test, predictions, num_patches=3, patch
         seg_cmap = cmap_segmentation
 
     for i, patch_idx in enumerate(patch_indices):
-        thermal_sequence = X_test[patch_idx]  # (5, 64, 64, 2)
-        true_labels = y_test[patch_idx]
-        pred_labels = predictions[patch_idx]
+        thermal_sequence = X_test_seq[patch_idx]  # (timesteps, 64, 64, channels)
+        true_labels = y_test_seq[patch_idx]
+        pred_labels = predictions_seq[patch_idx]
 
         if len(true_labels.shape) == 3 and true_labels.shape[-1] == 1:
             true_labels = true_labels.squeeze(-1)
 
-        thermal_frame = thermal_sequence[timestep_to_visualize]  # Shape: (64, 64, 2)
+        thermal_frame = thermal_sequence[timestep_to_visualize]  # (64, 64, channels)
         thermal_display = thermal_frame[:, :, 0]
 
         # Thermal Image (selected timestep)
@@ -633,17 +639,81 @@ def visualize_convlstm_results(X_test, y_test, predictions, num_patches=3, patch
     cbar2.set_label('Class Labels', rotation=270, labelpad=15)
     cbar2.set_ticks(range(14))
 
-    plt.tight_layout()
     plt.show()
 
-    print(f"\nAccuracy for visualized sequences:")
+    print(f"\nMetrics for visualized sequences:")
     for i, patch_idx in enumerate(patch_indices):
-        true_labels = y_test[patch_idx]
+        true_labels = y_test_seq[patch_idx]
         if len(true_labels.shape) == 3 and true_labels.shape[-1] == 1:
             true_labels = true_labels.squeeze(-1)
-        pred_labels = predictions[patch_idx]
-        accuracy = np.mean(true_labels == pred_labels)
-        print(f"Sequence {patch_idx + 1}: {accuracy:.4f}")
+        pred_labels = predictions_seq[patch_idx]
+
+        true_flat = true_labels.flatten()
+        pred_flat = pred_labels.flatten()
+        accuracy = np.mean(true_flat == pred_flat)
+        f1_macro = f1_score(true_flat, pred_flat, average='macro', zero_division=0)
+        print(f"Sequence {patch_idx + 1}: Accuracy = {accuracy:.4f}, F1 (macro) = {f1_macro:.4f}")
+
+    if positions_test_seq is None:
+        print("\nNote: No position data provided. Skipping map reconstruction.")
+        print("To enable reconstruction, load positions: pos_test_seq = np.load('pos_test_seq.npy')")
+        return
+
+    print(f"\nReconstructing full maps for ConvLSTM sequences...")
+    map_size = get_map_size_from_path(data_path)
+    print(f"Map size: {map_size[0]}x{map_size[1]}")
+
+    unique_dates = np.unique(positions_test_seq[:, 2])
+    print(f"Found {len(unique_dates)} unique date(s) in test sequences")
+
+    for date_idx in unique_dates:
+        date_mask = positions_test_seq[:, 2] == date_idx
+        date_y = y_test_seq[date_mask]
+        date_pred = predictions_seq[date_mask]
+        date_pos = positions_test_seq[date_mask]
+
+        if len(date_y.shape) == 4 and date_y.shape[-1] == 1:
+            date_y = date_y.squeeze(-1)
+
+        print(f"\nDate {int(date_idx)}: {len(date_y)} sequences")
+
+        # Geo maps using positions
+        gt_map = reconstruct_map_from_patches(date_y, date_pos, map_size)
+        pred_map = reconstruct_map_from_patches(date_pred, date_pos, map_size)
+
+        # Reconstructed maps
+        fig, axes = plt.subplots(1, 2, figsize=(20, 10), constrained_layout=True)
+
+        # Ground Truth Map
+        im1 = axes[0].imshow(gt_map, cmap=seg_cmap, vmin=0, vmax=13, aspect='equal')
+        axes[0].set_title(f'Date {int(date_idx)}: Ground Truth (ConvLSTM Reconstruction)', fontsize=14)
+        axes[0].axis('off')
+
+        # Prediction Map
+        im2 = axes[1].imshow(pred_map, cmap=seg_cmap, vmin=0, vmax=13, aspect='equal')
+        axes[1].set_title(f'Date {int(date_idx)}: Predictions (ConvLSTM Reconstruction)', fontsize=14)
+        axes[1].axis('off')
+
+        cbar = plt.colorbar(im2, ax=axes.ravel().tolist(), shrink=0.6, aspect=20)
+        cbar.set_label('Class Labels', rotation=270, labelpad=15)
+        cbar.set_ticks(range(14))
+
+        plt.show()
+
+        gt_flat = gt_map.flatten()
+        pred_flat = pred_map.flatten()
+
+        valid_mask = gt_flat != 0
+        if np.sum(valid_mask) > 0:
+            accuracy = np.mean(gt_flat[valid_mask] == pred_flat[valid_mask])
+            f1_macro = f1_score(gt_flat[valid_mask], pred_flat[valid_mask],
+                                average='macro', zero_division=0)
+
+            print(f"  Accuracy: {accuracy:.4f}")
+            print(f"  F1 (macro): {f1_macro:.4f}")
+            print(f"  Valid pixels: {np.sum(valid_mask):,} / {len(gt_flat):,}")
+        else:
+            print("  Warning: No valid pixels in reconstructed map")
 
 
 # -------------- WORKFLOW ----------------------------------------------------------------------------------------------

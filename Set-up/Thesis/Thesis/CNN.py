@@ -45,13 +45,16 @@ from collections import defaultdict
 
 
 # -------------- LOADING -----------------------------------------------------------------------------------------------
-data_path = 'E:/Studies/Thesis/THERMAL/Villoslada/Villoslada_thermal_winter/'
+data_path = 'C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Outputs/Santa O/'
 X_train = np.load(data_path + 'X_train.npy')
 X_valid = np.load(data_path + 'X_valid.npy')
 X_test = np.load(data_path + 'X_test.npy')
 y_train = np.load(data_path + 'y_train.npy')
 y_valid = np.load(data_path + 'y_valid.npy')
 y_test = np.load(data_path + 'y_test.npy')
+pos_train = np.load(data_path + 'pos_train.npy')
+pos_valid = np.load(data_path + 'pos_valid.npy')
+pos_test = np.load(data_path + 'pos_test.npy')
 
 # Cleaning for RGB and SAR
 X_train[:, :, :, 2:7] = np.nan_to_num(X_train[:, :, :, 2:7], nan=0.0)
@@ -441,7 +444,7 @@ def train_model(X_train, y_train, X_val, y_val, X_test, y_test, use_optuna=True,
     history = model.fit(
         X_train, y_train,
         validation_data=(X_val, y_val),
-        epochs=100,
+        epochs=1,
         batch_size=best_params['batch_size'],
         callbacks=[lr_callback, early_stopping, epoch_tracker],
         verbose=1
@@ -639,17 +642,61 @@ def plot_training(history):
     plt.show()
 
 
-def visualize_cnn_results(X_test, y_test, predictions, num_patches=3, patch_indices=None, figsize=(20, 10), cmap_thermal='hot', cmap_segmentation='tab20'):
+def get_map_size_from_path(data_path):
+    if 'Puertollano' in data_path:
+        return (273, 415)  # height, width
+    elif 'Santa O' in data_path:
+        return (278, 425)
+    elif 'Villoslada' in data_path:
+        return (267, 397)
+    else:
+        raise ValueError(f"Unknown area in path: {data_path}")
+
+
+def reconstruct_map_from_patches(patches, positions, map_size, patch_size=64):
     """
-    CNN results showing thermal images, ground truth labels, and predictions
+    Reconstruct map using stored patch positions.
+    """
+    map_h, map_w = map_size
+
+    if len(patches.shape) == 4:
+        reconstructed = np.zeros((map_h, map_w, patches.shape[-1]))
+    else:
+        reconstructed = np.zeros((map_h, map_w))
+
+    # Patches at stored position
+    for i, (patch, pos) in enumerate(zip(patches, positions)):
+        x_start = int(pos[0])
+        y_start = int(pos[1])
+
+        # Calculate actual size to copy
+        x_end = min(x_start + patch_size, map_h)
+        y_end = min(y_start + patch_size, map_w)
+
+        # Copy patch to map
+        if len(patches.shape) == 4:
+            reconstructed[x_start:x_end, y_start:y_end, :] = patch[:x_end - x_start, :y_end - y_start, :]
+        else:
+            reconstructed[x_start:x_end, y_start:y_end] = patch[:x_end - x_start, :y_end - y_start]
+
+    return reconstructed
+
+
+def visualize_cnn_results(X_test, y_test, predictions, data_path, positions_test=None, num_patches=3, patch_indices=None,
+                          figsize=(20, 10), cmap_thermal='hot', cmap_segmentation='tab20'):
+    """
+    Visualize CNN results showing:
+    1. Individual patches (thermal images, ground truth labels, and predictions)
+    2. Reconstructed full maps (ground truth and predictions)
     """
 
+    # Map size
+    map_size = get_map_size_from_path(data_path)
     if patch_indices is None:
         patch_indices = random.sample(range(len(X_test)), num_patches)
     else:
         num_patches = len(patch_indices)
 
-    # One column for each part: input, label and prediciton
     fig, axes = plt.subplots(num_patches, 3, figsize=figsize, constrained_layout=True)
     if num_patches == 1:
         axes = axes.reshape(1, -1)
@@ -664,7 +711,7 @@ def visualize_cnn_results(X_test, y_test, predictions, num_patches=3, patch_indi
         thermal_image = X_test[patch_idx]
         true_labels = y_test[patch_idx].squeeze()
         pred_labels = predictions[patch_idx]
-        thermal_display = thermal_image[:, :, 1]
+        thermal_display = thermal_image[:, :, 1] if len(thermal_image.shape) > 2 else thermal_image
 
         # Thermal Image
         im1 = axes[i, 0].imshow(thermal_display, cmap=cmap_thermal, aspect='equal')
@@ -698,6 +745,61 @@ def visualize_cnn_results(X_test, y_test, predictions, num_patches=3, patch_indi
         f1_macro = f1_score(true_labels, pred_labels, average='macro')
         print(f"Patch {patch_idx + 1}: Accuracy = {accuracy:.4f}, F1 (macro) = {f1_macro:.4f}")
 
+    if positions_test is None:
+        print("\nNote: No position data provided. Skipping map reconstruction.")
+        print("To enable reconstruction, load positions: pos_test = np.load('pos_test.npy')")
+        return
+
+    print(f"\nReconstructing full maps for {data_path.split('/')[-2]}...")
+    print(f"Map size: {map_size[0]}x{map_size[1]}")
+
+    # Patches by dates
+    unique_dates = np.unique(positions_test[:, 2])
+    print(f"Found {len(unique_dates)} unique date(s) in test set")
+
+    for date_idx in unique_dates:
+        date_mask = positions_test[:, 2] == date_idx
+        date_y = y_test[date_mask]
+        date_pred = predictions[date_mask]
+        date_pos = positions_test[date_mask]
+
+        print(f"\nDate {int(date_idx)}: {len(date_y)} patches")
+
+        # Reconstruct maps using positions
+        gt_map = reconstruct_map_from_patches(date_y, date_pos, map_size)
+        pred_map = reconstruct_map_from_patches(date_pred, date_pos, map_size)
+        fig, axes = plt.subplots(1, 2, figsize=(20, 10), constrained_layout=True)
+
+        # Ground Truth Map
+        im1 = axes[0].imshow(gt_map, cmap=seg_cmap, vmin=0, vmax=13, aspect='equal')
+        axes[0].set_title(f'Date {int(date_idx)}: Ground Truth (Full Reconstruction)', fontsize=14)
+        axes[0].axis('off')
+
+        # Prediction Map
+        im2 = axes[1].imshow(pred_map, cmap=seg_cmap, vmin=0, vmax=13, aspect='equal')
+        axes[1].set_title(f'Date {int(date_idx)}: Predictions (Full Reconstruction)', fontsize=14)
+        axes[1].axis('off')
+
+        cbar = plt.colorbar(im2, ax=axes.ravel().tolist(), shrink=0.6, aspect=20)
+        cbar.set_label('Class Labels', rotation=270, labelpad=15)
+        cbar.set_ticks(range(14))
+
+        plt.show()
+
+        gt_flat = gt_map.flatten()
+        pred_flat = pred_map.flatten()
+
+        valid_mask = gt_flat != 0
+        if np.sum(valid_mask) > 0:
+            accuracy = np.mean(gt_flat[valid_mask] == pred_flat[valid_mask])
+            f1_macro = f1_score(gt_flat[valid_mask], pred_flat[valid_mask], average='macro', zero_division=0)
+
+            print(f"  Accuracy: {accuracy:.4f}")
+            print(f"  F1 (macro): {f1_macro:.4f}")
+            print(f"  Valid pixels: {np.sum(valid_mask)} / {len(gt_flat)}")
+        else:
+            print("  Warning: No valid pixels in reconstructed map")
+
 
 # -------------- WORKFLOW ----------------------------------------------------------------------------------------------
 (model, history, predictions, best_params,
@@ -705,7 +807,7 @@ def visualize_cnn_results(X_test, y_test, predictions, num_patches=3, patch_indi
     X_train, y_train,
     X_valid, y_valid,
     X_test, y_test,
-    use_optuna=False, n_trials=15, epochs=100)
+    use_optuna=False, n_trials=15)
 
 class_names = [
     "NaNs",      # Class 0
@@ -742,7 +844,7 @@ for param_name, param_value in best_params.items():
 
 plot_training(history)
 
-visualize_cnn_results(X_test, y_test, predictions, figsize=(18, 10), patch_indices=[77, 134, 456])
+visualize_cnn_results(X_test, y_test, predictions, data_path=data_path, positions_test=pos_test, figsize=(18, 10), patch_indices=[0, 1, 2])
 
 '''
 Maximum patch index:

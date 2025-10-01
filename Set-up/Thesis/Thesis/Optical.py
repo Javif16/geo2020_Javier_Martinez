@@ -37,18 +37,18 @@ for fname in os.listdir(optical_folder):
 # B2, B3, B4
 for base_id, band_files in image_groups.items():
     if len(band_files) < 3:
-        print(f"⚠️ Skipping {base_id}: missing one or more RGB bands")
+        print(f"Skipping {base_id}: missing one or more RGB bands")
         continue
 
     qa_name = base_id + "_QA_PIXEL.TIF"
     qa_path = os.path.join(optical_folder, qa_name)
     if not os.path.exists(qa_path):
-        print(f"⚠️ Skipping {base_id}: QA_PIXEL not found")
+        print(f"Skipping {base_id}: QA_PIXEL not found")
         continue
 
     with rasterio.open(qa_path) as qa_src:
         if qa_src.crs != thermal_crs:
-            print(f"⚠️ Skipping {base_id}: CRS mismatch in QA_PIXEL")
+            print(f"Skipping {base_id}: CRS mismatch in QA_PIXEL")
             continue
         try:
             qa_window = from_bounds(*thermal_bounds, transform=qa_src.transform)
@@ -143,6 +143,6 @@ for base_id, band_files in image_groups.items():
         })
         with rasterio.open(os.path.join(output_folder, out_name), 'w', **band_profile) as dst:
             dst.write(band_array, 1)
-        print(f"✅ Saved: {out_name}")
+        print(f"Saved: {out_name}")
 
-print("🎉 All valid RGB images processed and saved.")
+print("All valid RGB images processed and saved.")

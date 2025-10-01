@@ -77,7 +77,7 @@ for fname in os.listdir(input_folder):
         # Mask invalid values (NaNs, Infs)
         valid_mask = np.isfinite(data)
         if not np.any(valid_mask):
-            print(f"⚠️ Skipping {fname}: no valid data found.")
+            print(f"Skipping {fname}: no valid data found.")
             continue
 
         # Normalize
@@ -95,4 +95,4 @@ for fname in os.listdir(input_folder):
         with rasterio.open(output_path, "w", **profile) as dst:
             dst.write(normalized, 1)
 
-    print(f"✅ Normalized and saved: {fname}")
+    print(f"Normalized and saved: {fname}")
