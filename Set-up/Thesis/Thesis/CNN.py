@@ -45,7 +45,7 @@ from collections import defaultdict
 
 
 # -------------- LOADING -----------------------------------------------------------------------------------------------
-data_path = 'C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Outputs/Santa O/'
+data_path = 'C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Outputs/Puertollano/thermal_summer/'
 X_train = np.load(data_path + 'X_train.npy')
 X_valid = np.load(data_path + 'X_valid.npy')
 X_test = np.load(data_path + 'X_test.npy')

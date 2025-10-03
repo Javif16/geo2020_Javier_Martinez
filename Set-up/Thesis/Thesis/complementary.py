@@ -570,7 +570,7 @@ def preprocess_thermal_data(thermal_files, mask_files, target_shape_thermal,
     return X, y, positions_array
 
 
-def split_and_normalize_thermal_data(X, y, positions, test_size=0.15, validation_size=0.15):
+def split_thermal_data(X, y, positions, test_size=0.15, validation_size=0.15):
     """Splitting and normalizing thermal data."""
     # Training
     X_train, X_test, y_train, y_test, pos_train, pos_test = train_test_split(X, y, positions, test_size=test_size, shuffle=False)
@@ -597,6 +597,28 @@ def split_and_normalize_thermal_data(X, y, positions, test_size=0.15, validation
         y_valid[i, :, :] = tf.where(y_valid[i, :, :] == 25, 0, y_valid[i, :, :])
     for i in range(y_test.shape[0]):
         y_test[i, :, :] = tf.where(y_test[i, :, :] == 25, 0, y_test[i, :, :])
+
+    # Normalizing thermal data
+    print("Normalizing thermal data...")
+    for band in range(X_train.shape[3]):
+        train_band_data = X_train[:, :, :, band].flatten()
+        valid_pixels = train_band_data[(train_band_data != 0) & (~np.isnan(train_band_data))]
+
+        if len(valid_pixels) > 0:
+            min_val = np.min(valid_pixels)
+            max_val = np.max(valid_pixels)
+            if max_val != min_val:
+                train_mask = (X_train[:, :, :, band] != 0) & (~np.isnan(X_train[:, :, :, band]))
+                valid_mask = (X_valid[:, :, :, band] != 0) & (~np.isnan(X_valid[:, :, :, band]))
+                test_mask = (X_test[:, :, :, band] != 0) & (~np.isnan(X_test[:, :, :, band]))
+
+                X_train[:, :, :, band] = np.where(train_mask, (X_train[:, :, :, band] - min_val) / (max_val - min_val),
+                                                  0)
+                X_valid[:, :, :, band] = np.where(valid_mask, (X_valid[:, :, :, band] - min_val) / (max_val - min_val),
+                                                  0)
+                X_test[:, :, :, band] = np.where(test_mask, (X_test[:, :, :, band] - min_val) / (max_val - min_val), 0)
+
+    print("Normalization complete!")
 
     return X_train, X_valid, X_test, y_train, y_valid, y_test, pos_train, pos_valid, pos_test
 
@@ -699,33 +721,6 @@ def create_time_sequences_from_patches(X_train, X_valid, X_test, y_train, y_vali
     return X_train_seq, X_valid_seq, X_test_seq, y_train_seq, y_valid_seq, y_test_seq
 
 
-def normalize_thermal_channels_only(X_train, X_valid, X_test):
-    """Normalize only the first 2 channels (thermal)."""
-    print("Normalizing thermal channels (0 and 1) only...")
-
-    for band in range(2):
-        train_band_data = X_train[:, :, :, band].flatten()
-        valid_pixels = train_band_data[(train_band_data != 0) & (~np.isnan(train_band_data))]
-
-        if len(valid_pixels) > 0:
-            min_val = np.min(valid_pixels)
-            max_val = np.max(valid_pixels)
-
-            if max_val != min_val:
-                train_mask = (X_train[:, :, :, band] != 0) & (~np.isnan(X_train[:, :, :, band]))
-                valid_mask = (X_valid[:, :, :, band] != 0) & (~np.isnan(X_valid[:, :, :, band]))
-                test_mask = (X_test[:, :, :, band] != 0) & (~np.isnan(X_test[:, :, :, band]))
-
-                X_train[:, :, :, band] = np.where(train_mask,
-                                                  (X_train[:, :, :, band] - min_val) / (max_val - min_val), 0)
-                X_valid[:, :, :, band] = np.where(valid_mask,
-                                                  (X_valid[:, :, :, band] - min_val) / (max_val - min_val), 0)
-                X_test[:, :, :, band] = np.where(test_mask,
-                                                 (X_test[:, :, :, band] - min_val) / (max_val - min_val), 0)
-
-    return X_train, X_valid, X_test
-
-
 def process_ecostress_thermal_data(data_dir, mask_file, optical_dir=None, sar_dir=None, target_shape_thermal=(64, 64, 2), target_shape_mask=(64, 64, 1),
                                    max_cloud_percentage=12, max_bad_percentage=15, sequence_length=5, overlap=2):
     """
@@ -800,11 +795,7 @@ def process_ecostress_thermal_data(data_dir, mask_file, optical_dir=None, sar_di
 
         # Split
         X_train, X_valid, X_test, y_train, y_valid, y_test, pos_train, pos_valid, pos_test = \
-            split_and_normalize_thermal_data(X, y, positions)
-
-        # Normalize only thermal channels for multi-modal
-        if channels > 2:
-            X_train, X_valid, X_test = normalize_thermal_channels_only(X_train, X_valid, X_test)
+            split_thermal_data(X, y, positions)
 
         # ConvLSTM sequences
         X_train_seq, X_valid_seq, X_test_seq, y_train_seq, y_valid_seq, y_test_seq = \
@@ -813,7 +804,7 @@ def process_ecostress_thermal_data(data_dir, mask_file, optical_dir=None, sar_di
         pos_train_seq, pos_valid_seq, pos_test_seq = create_convlstm_positions(pos_train, pos_valid, pos_test, sequence_length, overlap)
 
         print("\nStep 6: Saving processed dataset...")
-        save_dir = "C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Outputs"
+        save_dir = f"C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Outputs/Puertollano/{combo_name}"
         os.makedirs(save_dir, exist_ok=True)
         # CNN
         np.save(os.path.join(save_dir, 'X_train.npy'), X_train)
@@ -825,9 +816,9 @@ def process_ecostress_thermal_data(data_dir, mask_file, optical_dir=None, sar_di
         np.save(os.path.join(save_dir, 'pos_train.npy'), pos_train)
         np.save(os.path.join(save_dir, 'pos_valid.npy'), pos_valid)
         np.save(os.path.join(save_dir, 'pos_test.npy'), pos_test)
-        print("Dataset saved for CNN")
+        print(f"Dataset saved for CNN in {save_dir}")
 
-        # ConvLSTM data
+        # Save ConvLSTM data
         np.save(os.path.join(save_dir, 'X_train_seq.npy'), X_train_seq)
         np.save(os.path.join(save_dir, 'X_valid_seq.npy'), X_valid_seq)
         np.save(os.path.join(save_dir, 'X_test_seq.npy'), X_test_seq)
@@ -837,7 +828,7 @@ def process_ecostress_thermal_data(data_dir, mask_file, optical_dir=None, sar_di
         np.save(os.path.join(save_dir, 'pos_train_seq.npy'), pos_train_seq)
         np.save(os.path.join(save_dir, 'pos_valid_seq.npy'), pos_valid_seq)
         np.save(os.path.join(save_dir, 'pos_test_seq.npy'), pos_test_seq)
-        print("Dataset saved for ConvLSTM")
+        print(f"Dataset saved for ConvLSTM in {save_dir}")
 
         all_results[combo_name] = {
             'cnn': (X_train, X_valid, X_test, y_train, y_valid, y_test, pos_train, pos_valid, pos_test),
@@ -848,8 +839,8 @@ def process_ecostress_thermal_data(data_dir, mask_file, optical_dir=None, sar_di
 
 
 results = process_ecostress_thermal_data(
-        data_dir="C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/THERMAL/Santa_full/",
-        mask_file="C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Masks/Santa Olalla masks/Geo_map_resized_Santa.tif",
-        optical_dir="C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/RGB/Santa Olalla RGB/",
-        sar_dir="C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/SAR/SAR Santa Olalla/",
+        data_dir="C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/THERMAL/Puertollano_full/",
+        mask_file="C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Masks/Puertollano masks/Geo_map_resized_Puerto.tif",
+        optical_dir="C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/RGB/Puertollano RGB/",
+        sar_dir="C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/SAR/SAR Puertollano/",
         sequence_length=5, overlap=2)
