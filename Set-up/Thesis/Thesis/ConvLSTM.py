@@ -39,18 +39,29 @@ from optuna.trial import TrialState
 import pickle
 from math import ceil
 from collections import defaultdict
-
-from CNN import reconstruct_map_from_patches, get_map_size_from_path
-
+from utils import get_map_size_from_path, reconstruct_map_from_patches
 
 # -------------- LOADING DATA ------------------------------------------------------------------------------------------
-data_path = "C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Outputs/Puertollano/Puertollano_thermal_day/"
+data_path = r"E:/Studies/Thesis/Outputs/Villoslada overlap/thermal_only/"
 X_train = np.load(data_path + 'X_train_seq.npy')
 X_valid = np.load(data_path + 'X_valid_seq.npy')
 X_test = np.load(data_path + 'X_test_seq.npy')
 y_train = np.load(data_path + 'y_train_seq.npy')
 y_valid = np.load(data_path + 'y_valid_seq.npy')
 y_test = np.load(data_path + 'y_test_seq.npy')
+pos_test = np.load(data_path + 'pos_test_seq.npy')
+# positions
+pos_train = np.load(data_path + 'pos_train_seq.npy')
+pos_valid = np.load(data_path + 'pos_valid_seq.npy')
+pos_test = np.load(data_path + 'pos_test_seq.npy')
+# ndvi
+ndvi_test_agg = np.load(data_path + 'ndvi_test_agg.npy')
+has_ndvi_test = np.load(data_path + 'has_ndvi_test_seq.npy')
+ndvi_test_counts = np.load(data_path + 'ndvi_test_counts.npy')
+print(f"Loaded NDVI aggregated data: {ndvi_test_agg.shape}")
+print(f"Sequences with NDVI: {np.sum(has_ndvi_test)}/{len(has_ndvi_test)}")
+print(f"Mean NDVI frames per sequence: {np.mean(ndvi_test_counts):.1f}")
+
 
 # Cleaning for rgb and sar
 X_train[:, :, :, :, 2:7] = np.nan_to_num(X_train[:, :, :, :, 2:7], nan=0.0)
@@ -68,7 +79,7 @@ for channel in range(X_train.shape[-1]):
 
 
 # -------------- ConvLSTM U-Net ----------------------------------------------------------------------------------------
-def clstm_unet_model(size_input=(5, 64, 64, 2), filters_base=16, classes=14, l2_reg=0.01):
+def clstm_unet_model(size_input=(5, 128, 128, 2), filters_base=16, classes=14, l2_reg=0.01):
     '''
     U-Net architecture with encoder and decoder.
     '''
@@ -230,24 +241,51 @@ class EpochTracker(tf.keras.callbacks.Callback):
 
 
 # -------------- LOSS FUNCTION -----------------------------------------------------------------------------------------
-def simple_weighted_loss(class_weights):
+def simple_weighted_loss(class_weights, gamma=2.0, alpha=0.25):
+    """
+    Combines focal loss (for hard examples) with class weights (for imbalance)
+    Adapted for ConvLSTM
+    """
     def loss_fn(y_true, y_pred):
-        y_true = tf.squeeze(y_true, axis=-1)  # [4,64,64,1] -> [4,64,64]
-        loss = tf.keras.losses.sparse_categorical_crossentropy(y_true, y_pred)
+        y_true = tf.squeeze(y_true, axis=-1)  # [batch, H, W]
+        y_true = tf.cast(y_true, tf.int32)
 
-        # Class weights
-        sample_weights = tf.gather([
-            class_weights.get(0, 1.0), class_weights.get(1, 1.0), class_weights.get(2, 1.0),
-            class_weights.get(3, 1.0), class_weights.get(4, 1.0), class_weights.get(5, 1.0),
-            class_weights.get(6, 1.0), class_weights.get(7, 1.0), class_weights.get(8, 1.0),
-            class_weights.get(9, 1.0), class_weights.get(10, 1.0), class_weights.get(11, 1.0),
+        # Clip predictions for numerical stability
+        y_pred = tf.clip_by_value(y_pred, 1e-7, 1.0 - 1e-7)
+
+        # One-hot encode
+        y_true_one_hot = tf.one_hot(y_true, depth=14)
+
+        # Standard cross-entropy
+        cross_entropy = -y_true_one_hot * tf.math.log(y_pred)
+
+        # Focal term: (1 - p_t)^gamma
+        focal_weight = tf.pow(1 - y_pred, gamma)
+
+        # Apply focal weighting
+        focal_loss = alpha * focal_weight * cross_entropy
+
+        # Apply class weights
+        class_weight_tensor = tf.constant([
+            class_weights.get(0, 1.0), class_weights.get(1, 1.0),
+            class_weights.get(2, 1.0), class_weights.get(3, 1.0),
+            class_weights.get(4, 1.0), class_weights.get(5, 1.0),
+            class_weights.get(6, 1.0), class_weights.get(7, 1.0),
+            class_weights.get(8, 1.0), class_weights.get(9, 1.0),
+            class_weights.get(10, 1.0), class_weights.get(11, 1.0),
             class_weights.get(12, 1.0), class_weights.get(13, 1.0)
-        ], tf.cast(y_true, tf.int32))
+        ], dtype=tf.float32)
 
-        return tf.reduce_mean(loss * sample_weights)
+        # Gather weights for each pixel's true class
+        sample_weights = tf.gather(class_weight_tensor, y_true)
+        sample_weights = tf.expand_dims(sample_weights, axis=-1)
+
+        # Combine focal loss AND class weights
+        weighted_focal_loss = focal_loss * sample_weights
+
+        return tf.reduce_mean(tf.reduce_sum(weighted_focal_loss, axis=-1))
 
     return loss_fn
-
 
 # -------------- TRAINING ----------------------------------------------------------------------------------------------
 def train_evaluate_model(X_train, y_train, X_val, y_val, X_test, y_test, use_optuna=True, n_trials=30, epochs=30):
@@ -324,7 +362,7 @@ def train_evaluate_model(X_train, y_train, X_val, y_val, X_test, y_test, use_opt
     else:
         # base params
         best_params = {
-            'learning_rate': 0.00001,
+            'learning_rate': 0.0001,
             'l2factor': 0.05,
             'batch_size': 4,
             'filters_base': 16
@@ -336,7 +374,7 @@ def train_evaluate_model(X_train, y_train, X_val, y_val, X_test, y_test, use_opt
 
     # MODEL
     model = clstm_unet_model(
-        size_input=(5, 64, 64, 2),
+        size_input=(5, 128, 128, 2),
         filters_base=best_params['filters_base'],
         classes=14,
         l2_reg=best_params['l2factor'])
@@ -345,15 +383,15 @@ def train_evaluate_model(X_train, y_train, X_val, y_val, X_test, y_test, use_opt
 
     class_weights = {
         0: 1.0,  # NaNs (background)
-        1: 3.0,  # Sand
-        2: 3.0,  # Clay
+        1: 3.5,  # Sand
+        2: 2.5,  # Clay
         3: 1.0,  # Chalk
-        4: 2.0,  # Silt - keep high
-        5: 1.0,  # Peat
-        6: 2.0,  # Loam
+        4: 6.0,  # Silt
+        5: 5.0,  # Peat
+        6: 1.0,  # Loam
         7: 1.0,  # Detritic
         8: 2.0,  # Carbonate
-        9: 3.0,  # Volcanic
+        9: 1.0,  # Volcanic
         10: 1.0,  # Plutonic
         11: 1.0,  # Foliated
         12: 1.0,  # Non-Foliated
@@ -365,8 +403,8 @@ def train_evaluate_model(X_train, y_train, X_val, y_val, X_test, y_test, use_opt
 
     # OPTIMIZER and LOSS
     optimizer = tf.keras.optimizers.Adam(learning_rate=best_params['learning_rate'])
-    loss = tf.keras.losses.SparseCategoricalCrossentropy()
-    # loss = simple_weighted_loss(class_weights)
+    # loss = tf.keras.losses.SparseCategoricalCrossentropy()
+    loss = simple_weighted_loss(class_weights, gamma=2.0, alpha=1.0)
 
     model.compile(
         optimizer=optimizer,
@@ -396,7 +434,7 @@ def train_evaluate_model(X_train, y_train, X_val, y_val, X_test, y_test, use_opt
     history = model.fit(
         X_train, y_train,
         validation_data=(X_val, y_val),
-        epochs=1,
+        epochs=150,
         batch_size=best_params['batch_size'],
         callbacks=[lr_callback, early_stopping, epoch_tracker],
         verbose=1
@@ -416,11 +454,12 @@ def train_evaluate_model(X_train, y_train, X_val, y_val, X_test, y_test, use_opt
         predictions_list.append(pred)
     final_predictions = np.concatenate(predictions_list, axis=0)
     predictions = np.argmax(final_predictions, axis=-1)
+    confidences = np.max(final_predictions, axis=-1)
 
     return (model, history, predictions, best_params,
             epoch_tracker.selected_epoch_predictions,
             epoch_tracker.selected_epoch_metrics,
-            epoch_tracker.epoch_metrics)
+            epoch_tracker.epoch_metrics, confidences)
 
 
 # -------------- PERFORMANCE -------------------------------------------------------------------------------------------
@@ -590,6 +629,10 @@ def visualize_convlstm_results(X_test_seq, y_test_seq, predictions_seq, data_pat
     2. Reconstructed full maps (ground truth and predictions)
     """
 
+    if positions_test_seq is not None and len(positions_test_seq) != len(X_test_seq):
+        print(f"Warning: Aligning position data ({len(positions_test_seq)}) to sequences ({len(X_test_seq)})")
+        positions_test_seq = positions_test_seq[:len(X_test_seq)]
+
     if patch_indices is None:
         patch_indices = random.sample(range(len(X_test_seq)), num_patches)
     else:
@@ -677,11 +720,15 @@ def visualize_convlstm_results(X_test_seq, y_test_seq, predictions_seq, data_pat
 
         print(f"\nDate {int(date_idx)}: {len(date_y)} sequences")
 
-        # Geo maps using positions
-        gt_map = reconstruct_map_from_patches(date_y, date_pos, map_size)
-        pred_map = reconstruct_map_from_patches(date_pred, date_pos, map_size)
-
-        # Reconstructed maps
+        # Reconstructed maps from positions
+        gt_map = reconstruct_map_from_patches(
+            date_y, date_pos, map_size,
+            patch_size=128,  # Changed from 64
+            handle_overlap=True)  # Make sure this is True
+        pred_map = reconstruct_map_from_patches(
+            date_pred, date_pos, map_size,
+            patch_size=128,  # Changed from 64
+            handle_overlap=True)
         fig, axes = plt.subplots(1, 2, figsize=(20, 10), constrained_layout=True)
 
         # Ground Truth Map
@@ -716,9 +763,187 @@ def visualize_convlstm_results(X_test_seq, y_test_seq, predictions_seq, data_pat
             print("  Warning: No valid pixels in reconstructed map")
 
 
+def visualize_ndvi_correlation_convlstm(y_test_seq, predictions_seq, confidences_seq,
+                                        ndvi_test_agg, has_ndvi_test, ndvi_test_counts,
+                                        positions_test_seq, data_path, date_idx=None, min_ndvi_frames=3):
+    """
+    ConvLSTM version: Uses aggregated NDVI values per sequence
+    """
+    n_sequences = len(y_test_seq)
+    if len(positions_test_seq) != n_sequences:
+        print(f"Warning: Aligning position data ({len(positions_test_seq)}) to sequences ({n_sequences})")
+        positions_test_seq = positions_test_seq[:n_sequences]
+        has_ndvi_test = has_ndvi_test[:n_sequences]
+        ndvi_test_agg = ndvi_test_agg[:n_sequences]
+        ndvi_test_counts = ndvi_test_counts[:n_sequences]
+
+    map_size = get_map_size_from_path(data_path)
+    patch_size = 128
+    # Filter sequences with sufficient NDVI data
+    if date_idx is not None:
+        date_mask = positions_test_seq[:, 2] == date_idx
+        valid_mask = date_mask & has_ndvi_test & (ndvi_test_counts >= min_ndvi_frames)
+    else:
+        valid_mask = has_ndvi_test & (ndvi_test_counts >= min_ndvi_frames)
+
+    if np.sum(valid_mask) == 0:
+        print(f"No sequences with ≥{min_ndvi_frames} NDVI frames found!")
+        return
+
+    print(f"\nAnalyzing {np.sum(valid_mask)} sequences with NDVI data...")
+    print(f"  (filtered to sequences with ≥{min_ndvi_frames} NDVI frames)")
+
+    # Get valid data
+    valid_y = y_test_seq[valid_mask]
+    if len(valid_y.shape) == 4 and valid_y.shape[-1] == 1:
+        valid_y = valid_y.squeeze(-1)
+
+    valid_pred = predictions_seq[valid_mask]
+    valid_conf = confidences_seq[valid_mask]
+    valid_ndvi = ndvi_test_agg[valid_mask]  # Use aggregated NDVI
+    valid_pos = positions_test_seq[valid_mask]
+
+    # Reconstruct maps
+    print("Reconstructing maps...")
+    conf_map = reconstruct_map_from_patches(
+        valid_conf, valid_pos, map_size,
+        patch_size=128, handle_overlap=True)  # Changed from 64
+    ndvi_map = reconstruct_map_from_patches(
+        valid_ndvi, valid_pos, map_size,
+        patch_size=128, handle_overlap=True)  # Changed from 64
+    gt_map = reconstruct_map_from_patches(
+        valid_y, valid_pos, map_size,
+        patch_size=128, handle_overlap=True)  # Changed from 64
+    pred_map = reconstruct_map_from_patches(
+        valid_pred, valid_pos, map_size,
+        patch_size=128, handle_overlap=True)  # Changed from 64
+
+    # Accuracy map
+    accuracy_map = (gt_map == pred_map).astype(float)
+    accuracy_map[gt_map == 0] = np.nan
+    ndvi_map_display = ndvi_map.copy()
+    ndvi_map_display[ndvi_map == 0] = np.nan
+    conf_map_display = conf_map.copy()
+    conf_map_display[gt_map == 0] = np.nan
+
+    # ========== VISUALIZATION 1: Confidence + NDVI ==========
+    fig, axes = plt.subplots(1, 2, figsize=(20, 10), constrained_layout=True)
+
+    im1 = axes[0].imshow(conf_map_display, cmap='RdYlGn', vmin=0, vmax=1, aspect='equal')
+    axes[0].set_title('ConvLSTM Confidence (Max Softmax Probability)', fontsize=14)
+    axes[0].axis('off')
+    cbar1 = plt.colorbar(im1, ax=axes[0], shrink=0.6)
+    cbar1.set_label('Confidence', rotation=270, labelpad=15)
+
+    im2 = axes[1].imshow(ndvi_map_display, cmap='YlGn', vmin=-0.2, vmax=0.8, aspect='equal')
+    axes[1].set_title('NDVI (Aggregated per Sequence)', fontsize=14)
+    axes[1].axis('off')
+    cbar2 = plt.colorbar(im2, ax=axes[1], shrink=0.6)
+    cbar2.set_label('NDVI', rotation=270, labelpad=15)
+
+    date_str = f"Date {int(date_idx)}" if date_idx is not None else "All Dates"
+    fig.suptitle(f'{date_str}: ConvLSTM Confidence vs NDVI', fontsize=16, y=0.98)
+    plt.show()
+
+    # ========== VISUALIZATION 2: Accuracy Map ==========
+    fig, ax = plt.subplots(1, 1, figsize=(10, 10), constrained_layout=True)
+    im = ax.imshow(accuracy_map, cmap='RdYlGn', vmin=0, vmax=1, aspect='equal')
+    ax.set_title(f'{date_str}: ConvLSTM Pixel-wise Accuracy', fontsize=14)
+    ax.axis('off')
+    cbar = plt.colorbar(im, ax=ax, shrink=0.6)
+    cbar.set_label('Correct (1) / Incorrect (0)', rotation=270, labelpad=15)
+    plt.show()
+
+    # ========== CORRELATION ANALYSIS ==========
+    from scipy.stats import pearsonr
+
+    conf_flat = conf_map.flatten()
+    ndvi_flat = ndvi_map.flatten()
+    acc_flat = accuracy_map.flatten()
+
+    valid_pixels = (ndvi_flat != 0) & (~np.isnan(ndvi_flat)) & (~np.isnan(conf_flat))
+
+    conf_values = conf_flat[valid_pixels]
+    ndvi_values = ndvi_flat[valid_pixels]
+    acc_values = acc_flat[valid_pixels]
+
+    print(f"Valid pixels for correlation: {len(conf_values):,}")
+
+    if len(conf_values) < 10:
+        print("Not enough valid pixels for correlation!")
+        return
+
+    corr_conf_ndvi, p_conf = pearsonr(conf_values, ndvi_values)
+    corr_acc_ndvi, p_acc = pearsonr(acc_values, ndvi_values)
+
+    print(f"\nCorrelation Results:")
+    print(f"  Confidence vs NDVI: r={corr_conf_ndvi:.3f}, p={p_conf:.4f}")
+    print(f"  Accuracy vs NDVI: r={corr_acc_ndvi:.3f}, p={p_acc:.4f}")
+
+    # ========== VISUALIZATION 3: Correlation Plots ==========
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6), constrained_layout=True)
+
+    # Confidence vs NDVI
+    axes[0].hexbin(ndvi_values, conf_values, gridsize=50, cmap='Blues', mincnt=1)
+    axes[0].set_xlabel('NDVI (Aggregated)', fontsize=12)
+    axes[0].set_ylabel('ConvLSTM Confidence', fontsize=12)
+    axes[0].set_title(f'Confidence vs NDVI\nr={corr_conf_ndvi:.3f}, p={p_conf:.4f}', fontsize=14)
+    axes[0].grid(True, alpha=0.3)
+
+    z = np.polyfit(ndvi_values, conf_values, 1)
+    p = np.poly1d(z)
+    ndvi_sorted = np.sort(ndvi_values)
+    axes[0].plot(ndvi_sorted, p(ndvi_sorted), "r--", linewidth=2,
+                 label=f'Trend: y={z[0]:.3f}x+{z[1]:.3f}')
+    axes[0].legend()
+
+    # Accuracy vs NDVI
+    ndvi_bins = np.linspace(ndvi_values.min(), ndvi_values.max(), 20)
+    bin_indices = np.digitize(ndvi_values, ndvi_bins)
+
+    bin_means = []
+    bin_centers = []
+    for i in range(1, len(ndvi_bins)):
+        mask = bin_indices == i
+        if np.sum(mask) > 0:
+            bin_means.append(np.mean(acc_values[mask]))
+            bin_centers.append((ndvi_bins[i - 1] + ndvi_bins[i]) / 2)
+
+    axes[1].scatter(ndvi_values, acc_values, alpha=0.1, s=1, c='blue')
+    axes[1].plot(bin_centers, bin_means, 'ro-', linewidth=2, markersize=8,
+                 label='Mean Accuracy per Bin')
+    axes[1].set_xlabel('NDVI (Aggregated)', fontsize=12)
+    axes[1].set_ylabel('Pixel Accuracy', fontsize=12)
+    axes[1].set_title(f'Accuracy vs NDVI\nr={corr_acc_ndvi:.3f}, p={p_acc:.4f}', fontsize=14)
+    axes[1].set_ylim([-0.1, 1.1])
+    axes[1].grid(True, alpha=0.3)
+    axes[1].legend()
+
+    fig.suptitle(f'{date_str}: ConvLSTM NDVI Correlation', fontsize=16, y=1.02)
+    plt.show()
+
+    # ========== STATISTICS BY NDVI RANGES ==========
+    print("\n=== ConvLSTM Performance by NDVI Range ===")
+    ndvi_ranges = [
+        (-1.0, 0.0, "Bare Soil/Water"),
+        (0.0, 0.2, "Low Vegetation"),
+        (0.2, 0.4, "Moderate Vegetation"),
+        (0.4, 0.6, "Healthy Vegetation"),
+        (0.6, 1.0, "Very Healthy Vegetation")
+    ]
+
+    for ndvi_min, ndvi_max, label in ndvi_ranges:
+        mask = (ndvi_values >= ndvi_min) & (ndvi_values < ndvi_max)
+        if np.sum(mask) > 0:
+            mean_conf = np.mean(conf_values[mask])
+            mean_acc = np.mean(acc_values[mask])
+            n_pixels = np.sum(mask)
+            print(f"{label:25s} (NDVI {ndvi_min:.1f}-{ndvi_max:.1f}): "
+                  f"Conf={mean_conf:.3f}, Acc={mean_acc:.3f}, N={n_pixels:,}")
+
+
 # -------------- WORKFLOW ----------------------------------------------------------------------------------------------
-(model, history, predictions, best_params,
- epoch_predictions, epoch_metrics, all_epoch_metrics) = train_evaluate_model(
+(model, history, predictions, best_params, epoch_predictions, epoch_metrics, all_epoch_metrics, confidences) = train_evaluate_model(
     X_train, y_train,
     X_valid, y_valid,
     X_test, y_test,
@@ -761,7 +986,25 @@ for param_name, param_value in best_params.items():
 
 plot_training(history)
 
-visualize_convlstm_results(X_test, y_test, predictions, patch_indices=[15, 34, 36], timestep_to_visualize=-1)
+visualize_convlstm_results(X_test, y_test, predictions, data_path=data_path, positions_test_seq=pos_test, patch_indices=[15, 34, 36], timestep_to_visualize=-1)
+
+print("\n=== CONVLSTM NDVI CORRELATION ANALYSIS ===")
+
+# Per date
+unique_dates = np.unique(pos_test[:, 2])
+for date_idx in unique_dates:
+    print(f"\n--- Analyzing Date {int(date_idx)} ---")
+    visualize_ndvi_correlation_convlstm(
+        y_test, predictions, confidences,
+        ndvi_test_agg, has_ndvi_test, ndvi_test_counts,
+        pos_test, data_path, date_idx=date_idx, min_ndvi_frames=3)
+
+# Overall
+print(f"\n--- Overall Analysis (All Dates) ---")
+visualize_ndvi_correlation_convlstm(
+    y_test, predictions, confidences,
+    ndvi_test_agg, has_ndvi_test, ndvi_test_counts,
+    pos_test, data_path, date_idx=None, min_ndvi_frames=3)
 
 '''
 Maximum patch index:
