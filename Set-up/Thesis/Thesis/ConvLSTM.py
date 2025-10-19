@@ -42,7 +42,7 @@ from collections import defaultdict
 from utils import get_map_size_from_path, reconstruct_map_from_patches
 
 # -------------- LOADING DATA ------------------------------------------------------------------------------------------
-data_path = r"E:/Studies/Thesis/Outputs/Villoslada overlap/thermal_only/"
+data_path = r"E:/Studies/Thesis/Outputs/Puertollano overlap/thermal_only/"
 X_train = np.load(data_path + 'X_train_seq.npy')
 X_valid = np.load(data_path + 'X_valid_seq.npy')
 X_test = np.load(data_path + 'X_test_seq.npy')
@@ -244,28 +244,17 @@ class EpochTracker(tf.keras.callbacks.Callback):
 def simple_weighted_loss(class_weights, gamma=2.0, alpha=0.25):
     """
     Combines focal loss (for hard examples) with class weights (for imbalance)
-    Adapted for ConvLSTM
     """
     def loss_fn(y_true, y_pred):
         y_true = tf.squeeze(y_true, axis=-1)  # [batch, H, W]
         y_true = tf.cast(y_true, tf.int32)
-
-        # Clip predictions for numerical stability
         y_pred = tf.clip_by_value(y_pred, 1e-7, 1.0 - 1e-7)
 
-        # One-hot encode
         y_true_one_hot = tf.one_hot(y_true, depth=14)
-
-        # Standard cross-entropy
         cross_entropy = -y_true_one_hot * tf.math.log(y_pred)
-
-        # Focal term: (1 - p_t)^gamma
         focal_weight = tf.pow(1 - y_pred, gamma)
-
-        # Apply focal weighting
         focal_loss = alpha * focal_weight * cross_entropy
 
-        # Apply class weights
         class_weight_tensor = tf.constant([
             class_weights.get(0, 1.0), class_weights.get(1, 1.0),
             class_weights.get(2, 1.0), class_weights.get(3, 1.0),
@@ -276,16 +265,14 @@ def simple_weighted_loss(class_weights, gamma=2.0, alpha=0.25):
             class_weights.get(12, 1.0), class_weights.get(13, 1.0)
         ], dtype=tf.float32)
 
-        # Gather weights for each pixel's true class
         sample_weights = tf.gather(class_weight_tensor, y_true)
         sample_weights = tf.expand_dims(sample_weights, axis=-1)
-
-        # Combine focal loss AND class weights
         weighted_focal_loss = focal_loss * sample_weights
 
         return tf.reduce_mean(tf.reduce_sum(weighted_focal_loss, axis=-1))
 
     return loss_fn
+
 
 # -------------- TRAINING ----------------------------------------------------------------------------------------------
 def train_evaluate_model(X_train, y_train, X_val, y_val, X_test, y_test, use_optuna=True, n_trials=30, epochs=30):
@@ -382,19 +369,19 @@ def train_evaluate_model(X_train, y_train, X_val, y_val, X_test, y_test, use_opt
     print("Model output shape:", model.output_shape)
 
     class_weights = {
-        0: 1.0,  # NaNs (background)
-        1: 3.5,  # Sand
-        2: 2.5,  # Clay
+        0: 1.5,  # NaNs (background)
+        1: 10.0,  # Sand
+        2: 10.0,  # Clay -
         3: 1.0,  # Chalk
-        4: 6.0,  # Silt
-        5: 5.0,  # Peat
-        6: 1.0,  # Loam
-        7: 1.0,  # Detritic
-        8: 2.0,  # Carbonate
-        9: 1.0,  # Volcanic
+        4: 7.5,  # Silt -
+        5: 1.0,  # Peat
+        6: 4.0,  # Loam -
+        7: 1.0,  # Detritic -
+        8: 1.5,  # Carbonate -
+        9: 3.0,  # Volcanic -
         10: 1.0,  # Plutonic
-        11: 1.0,  # Foliated
-        12: 1.0,  # Non-Foliated
+        11: 15.0,  # Foliated -
+        12: 2.5,  # Non-Foliated -
         13: 1.0  # Water
     }
     # Puertollano - 1, 2, 4, 6, 7, 8, 9, 11, 12
@@ -723,11 +710,11 @@ def visualize_convlstm_results(X_test_seq, y_test_seq, predictions_seq, data_pat
         # Reconstructed maps from positions
         gt_map = reconstruct_map_from_patches(
             date_y, date_pos, map_size,
-            patch_size=128,  # Changed from 64
-            handle_overlap=True)  # Make sure this is True
+            patch_size=128,
+            handle_overlap=True)
         pred_map = reconstruct_map_from_patches(
             date_pred, date_pos, map_size,
-            patch_size=128,  # Changed from 64
+            patch_size=128,
             handle_overlap=True)
         fig, axes = plt.subplots(1, 2, figsize=(20, 10), constrained_layout=True)
 
@@ -779,7 +766,6 @@ def visualize_ndvi_correlation_convlstm(y_test_seq, predictions_seq, confidences
 
     map_size = get_map_size_from_path(data_path)
     patch_size = 128
-    # Filter sequences with sufficient NDVI data
     if date_idx is not None:
         date_mask = positions_test_seq[:, 2] == date_idx
         valid_mask = date_mask & has_ndvi_test & (ndvi_test_counts >= min_ndvi_frames)
@@ -789,34 +775,31 @@ def visualize_ndvi_correlation_convlstm(y_test_seq, predictions_seq, confidences
     if np.sum(valid_mask) == 0:
         print(f"No sequences with ≥{min_ndvi_frames} NDVI frames found!")
         return
-
     print(f"\nAnalyzing {np.sum(valid_mask)} sequences with NDVI data...")
     print(f"  (filtered to sequences with ≥{min_ndvi_frames} NDVI frames)")
-
-    # Get valid data
     valid_y = y_test_seq[valid_mask]
     if len(valid_y.shape) == 4 and valid_y.shape[-1] == 1:
         valid_y = valid_y.squeeze(-1)
 
     valid_pred = predictions_seq[valid_mask]
     valid_conf = confidences_seq[valid_mask]
-    valid_ndvi = ndvi_test_agg[valid_mask]  # Use aggregated NDVI
+    valid_ndvi = ndvi_test_agg[valid_mask]  # aggregated NDVI
     valid_pos = positions_test_seq[valid_mask]
 
     # Reconstruct maps
     print("Reconstructing maps...")
     conf_map = reconstruct_map_from_patches(
         valid_conf, valid_pos, map_size,
-        patch_size=128, handle_overlap=True)  # Changed from 64
+        patch_size=128, handle_overlap=True)
     ndvi_map = reconstruct_map_from_patches(
         valid_ndvi, valid_pos, map_size,
-        patch_size=128, handle_overlap=True)  # Changed from 64
+        patch_size=128, handle_overlap=True)
     gt_map = reconstruct_map_from_patches(
         valid_y, valid_pos, map_size,
-        patch_size=128, handle_overlap=True)  # Changed from 64
+        patch_size=128, handle_overlap=True)
     pred_map = reconstruct_map_from_patches(
         valid_pred, valid_pos, map_size,
-        patch_size=128, handle_overlap=True)  # Changed from 64
+        patch_size=128, handle_overlap=True)
 
     # Accuracy map
     accuracy_map = (gt_map == pred_map).astype(float)
@@ -826,7 +809,7 @@ def visualize_ndvi_correlation_convlstm(y_test_seq, predictions_seq, confidences
     conf_map_display = conf_map.copy()
     conf_map_display[gt_map == 0] = np.nan
 
-    # ========== VISUALIZATION 1: Confidence + NDVI ==========
+    # Confidence + NDVI
     fig, axes = plt.subplots(1, 2, figsize=(20, 10), constrained_layout=True)
 
     im1 = axes[0].imshow(conf_map_display, cmap='RdYlGn', vmin=0, vmax=1, aspect='equal')
@@ -845,7 +828,7 @@ def visualize_ndvi_correlation_convlstm(y_test_seq, predictions_seq, confidences
     fig.suptitle(f'{date_str}: ConvLSTM Confidence vs NDVI', fontsize=16, y=0.98)
     plt.show()
 
-    # ========== VISUALIZATION 2: Accuracy Map ==========
+    # Accuracy Map
     fig, ax = plt.subplots(1, 1, figsize=(10, 10), constrained_layout=True)
     im = ax.imshow(accuracy_map, cmap='RdYlGn', vmin=0, vmax=1, aspect='equal')
     ax.set_title(f'{date_str}: ConvLSTM Pixel-wise Accuracy', fontsize=14)
@@ -854,7 +837,6 @@ def visualize_ndvi_correlation_convlstm(y_test_seq, predictions_seq, confidences
     cbar.set_label('Correct (1) / Incorrect (0)', rotation=270, labelpad=15)
     plt.show()
 
-    # ========== CORRELATION ANALYSIS ==========
     from scipy.stats import pearsonr
 
     conf_flat = conf_map.flatten()
@@ -866,21 +848,18 @@ def visualize_ndvi_correlation_convlstm(y_test_seq, predictions_seq, confidences
     conf_values = conf_flat[valid_pixels]
     ndvi_values = ndvi_flat[valid_pixels]
     acc_values = acc_flat[valid_pixels]
-
     print(f"Valid pixels for correlation: {len(conf_values):,}")
-
     if len(conf_values) < 10:
         print("Not enough valid pixels for correlation!")
         return
 
     corr_conf_ndvi, p_conf = pearsonr(conf_values, ndvi_values)
     corr_acc_ndvi, p_acc = pearsonr(acc_values, ndvi_values)
-
     print(f"\nCorrelation Results:")
     print(f"  Confidence vs NDVI: r={corr_conf_ndvi:.3f}, p={p_conf:.4f}")
     print(f"  Accuracy vs NDVI: r={corr_acc_ndvi:.3f}, p={p_acc:.4f}")
 
-    # ========== VISUALIZATION 3: Correlation Plots ==========
+    # Correlation Plots
     fig, axes = plt.subplots(1, 2, figsize=(16, 6), constrained_layout=True)
 
     # Confidence vs NDVI
@@ -922,7 +901,6 @@ def visualize_ndvi_correlation_convlstm(y_test_seq, predictions_seq, confidences
     fig.suptitle(f'{date_str}: ConvLSTM NDVI Correlation', fontsize=16, y=1.02)
     plt.show()
 
-    # ========== STATISTICS BY NDVI RANGES ==========
     print("\n=== ConvLSTM Performance by NDVI Range ===")
     ndvi_ranges = [
         (-1.0, 0.0, "Bare Soil/Water"),
@@ -989,7 +967,6 @@ plot_training(history)
 visualize_convlstm_results(X_test, y_test, predictions, data_path=data_path, positions_test_seq=pos_test, patch_indices=[15, 34, 36], timestep_to_visualize=-1)
 
 print("\n=== CONVLSTM NDVI CORRELATION ANALYSIS ===")
-
 # Per date
 unique_dates = np.unique(pos_test[:, 2])
 for date_idx in unique_dates:
@@ -998,7 +975,6 @@ for date_idx in unique_dates:
         y_test, predictions, confidences,
         ndvi_test_agg, has_ndvi_test, ndvi_test_counts,
         pos_test, data_path, date_idx=date_idx, min_ndvi_frames=3)
-
 # Overall
 print(f"\n--- Overall Analysis (All Dates) ---")
 visualize_ndvi_correlation_convlstm(
@@ -1010,32 +986,25 @@ visualize_ndvi_correlation_convlstm(
 Maximum patch index:
     Villoslada:
         · thermal only - 
-        · thermal_optical - 65
         · thermal_sar - 13
-        · all - 10
         · thermal_day - 82
         · thermal_night - 277
         · thermal_winter - 165
         · thermal_summer - 198
     Santa:
         · thermal only - 83
-        · thermal_optical - 7
         · thermal_sar - 15
-        · all - 1 
         · thermal_day - 57
         · thermal_night - 26
         · thermal_winter - 35
         · thermal_summer - 46
     Puertollano:
         · thermal only - 100
-        · thermal_optical - 6
         · thermal_sar - 25
-        · all - 1
         · thermal_day - 63
         · thermal_night - 52
         · thermal_winter - 56
         · thermal_summer - 55
-        5, 10, 11 son buenos patches
 '''
 
 # ---------------- SAVING ----------------------------------------------------------------------------------------------

@@ -61,10 +61,6 @@ def group_files_by_date(directory):
                 elif 'water' in filename:
                     grouped_files[date]['water'] = os.path.join(directory, filename)
 
-    print(f"Grouped {len(grouped_files)} dates:")
-    for date, files in list(grouped_files.items())[:3]:  # Show first 3 dates
-        print(f"  {date}: {list(files.keys())}")
-
     return grouped_files
 
 
@@ -101,18 +97,6 @@ def resample_to_match(source_file, target_file, output_path=None):
         return resampled_data
 
 
-def extract_date_from_ndvi_filename(filename):
-    """
-    Extract date from NDVI filename to match thermal dates.
-    """
-    match = re.search(r'S2_NDVI_(\d{8})', filename)
-    if match:
-        date_str = match.group(1)
-        date_obj = datetime.strptime(date_str, '%Y%m%d')
-        return date_obj.strftime('%Y%j')  # %j gives day of year
-    return None
-
-
 def extract_date_from_optical_filename(filename):
     """Date from optical filename format: LC08_L2SP_200033_20210801_..."""
     match = re.search(r'_(\d{8})_', filename)
@@ -129,27 +113,6 @@ def extract_date_from_sar_filename(filename):
         date_str = match.group(1)
         return datetime.strptime(date_str, '%Y%m%d').strftime('%Y%j')
     return None
-
-
-def group_ndvi_files_by_date(ndvi_dir):
-    """
-    Group NDVI files by date.
-    Returns: dict mapping date strings (YYYYDDD format) to file paths
-    """
-    grouped_files = {}
-
-    print(f"\nScanning NDVI directory: {ndvi_dir}")
-    for filename in os.listdir(ndvi_dir):
-        if filename.endswith('.tif'):
-            date = extract_date_from_ndvi_filename(filename)
-            if date:
-                grouped_files[date] = os.path.join(ndvi_dir, filename)
-                print(f"  Found NDVI for date {date}: {filename}")
-            else:
-                print(f"  Warning: Could not extract date from {filename}")
-
-    print(f"Total NDVI dates found: {len(grouped_files)}")
-    return grouped_files
 
 
 def group_optical_files_by_date(optical_dir):
@@ -207,54 +170,6 @@ def parse_thermal_datetime(date_str):
     return None
 
 
-def match_ndvi_to_thermal_dates(thermal_dates, ndvi_grouped, max_days_diff=16):
-    """
-    Match NDVI dates to thermal dates within a temporal window.
-
-    Args:
-        thermal_dates: list of thermal date strings (YYYYDDDHHMMSS format)
-        ndvi_grouped: dict from group_ndvi_files_by_date
-        max_days_diff: maximum days difference to consider a match
-
-    Returns:
-        dict mapping thermal_date -> ndvi_file_path
-    """
-
-    def parse_date(date_str):
-        """Parse YYYYDDD format to datetime"""
-        year = int(date_str[:4])
-        doy = int(date_str[4:7])
-        return datetime(year, 1, 1) + timedelta(days=doy - 1)
-
-    matched_ndvi = {}
-
-    for thermal_date in thermal_dates:
-        # Convert thermal date to YYYYDDD format
-        thermal_date_short = thermal_date[:7]  # Extract YYYYDDD from YYYYDDDHHMMSS
-        thermal_dt = parse_date(thermal_date_short)
-
-        # Find closest NDVI date
-        best_match = None
-        min_diff = float('inf')
-
-        for ndvi_date, ndvi_path in ndvi_grouped.items():
-            ndvi_dt = parse_date(ndvi_date)
-            days_diff = abs((thermal_dt - ndvi_dt).days)
-
-            if days_diff < min_diff and days_diff <= max_days_diff:
-                min_diff = days_diff
-                best_match = ndvi_path
-
-        if best_match:
-            matched_ndvi[thermal_date] = best_match
-            print(f"  Thermal {thermal_date} -> NDVI {os.path.basename(best_match)} ({min_diff} days)")
-        else:
-            print(f"  Warning: No NDVI match found for thermal date {thermal_date}")
-
-    print(f"\nMatched {len(matched_ndvi)} thermal dates with NDVI")
-    return matched_ndvi
-
-
 def is_day_time(dt):
     """Datetime is day time (6:00-17:59)"""
     return 6 <= dt.hour <= 17
@@ -267,7 +182,7 @@ def is_summer(dt):
     return march_22 <= dt <= sept_21
 
 
-def filter_dates_by_quality(grouped_files, max_cloud_percentage=12, max_bad_percentage=15):
+def filter_dates_by_quality(grouped_files, max_cloud_percentage=10, max_bad_percentage=10):
     """
     Quality assessment for cloud coverage and QA quality.
     """
@@ -484,41 +399,20 @@ def filter_thermal_data_by_time_season(thermal_data_list, quality_masks, filtere
     return categories
 
 
-def create_thermal_dataset(thermal_data_list, quality_masks, mask_file, filtered_dates, matched_ndvi, window_size=128, stride=64, directory="./data_thermal"):
+def create_thermal_dataset(thermal_data_list, quality_masks, mask_file, window_size=64, stride=64, directory="./data_thermal"):
     """
     Dataset with full coverage and position tracking.
     """
     os.makedirs(f"{directory}/thermal", exist_ok=True)
     os.makedirs(f"{directory}/mask", exist_ok=True)
-    os.makedirs(f"{directory}/ndvi", exist_ok=True)
 
     image_counter = 0
     total_images = len(thermal_data_list)
     positions_dict = {}
-    ndvi_metadata = {}
 
-    for date_idx, (thermal_array, quality_mask, date_str) in enumerate(
-            zip(thermal_data_list, quality_masks, filtered_dates)):
-
-        print(f"Processing thermal image {date_idx + 1} of {total_images} (date: {date_str})")
+    for date_idx, (thermal_array, quality_mask) in enumerate(zip(thermal_data_list, quality_masks)):
+        print(f"Processing thermal image {date_idx + 1} of {total_images}")
         n_bands, height, width = thermal_array.shape
-
-        # Load and resample NDVI if available for this date
-        ndvi_array = None
-        if date_str in matched_ndvi:
-            try:
-                ndvi_raw = tifffile.imread(matched_ndvi[date_str])
-                # Handle multi-band NDVI (take first band if needed)
-                if len(ndvi_raw.shape) == 3:
-                    ndvi_raw = ndvi_raw[0] if ndvi_raw.shape[0] < ndvi_raw.shape[1] else ndvi_raw[:, :, 0]
-
-                # Resample NDVI to match thermal grid
-                ndvi_array = resample_to_match_array(ndvi_raw, (height, width))
-                print(f"  ✓ NDVI loaded and resampled: {ndvi_array.shape}")
-            except Exception as e:
-                print(f"  ✗ Error loading NDVI for {date_str}: {e}")
-        else:
-            print(f"  ○ No NDVI available for {date_str}")
 
         # Sliding window
         x_ind = 0
@@ -527,31 +421,26 @@ def create_thermal_dataset(thermal_data_list, quality_masks, mask_file, filtered
             while y_ind <= (width - window_size):
                 success = save_thermal_window(
                     x_ind, y_ind, window_size, image_counter, thermal_array,
-                    quality_mask, mask_file, n_bands, directory, date_idx,
-                    positions_dict, ndvi_array, ndvi_metadata)
+                    quality_mask, mask_file, n_bands, directory, date_idx, positions_dict
+                )
                 if success:
                     image_counter += 1
                 y_ind += stride
             x_ind += stride
 
-    # Save positions metadata
+    # Positions metadata
     positions_file = os.path.join(directory, 'patch_positions.json')
     with open(positions_file, 'w') as f:
         json.dump(positions_dict, f, indent=2)
-    ndvi_meta_file = os.path.join(directory, 'ndvi_metadata.json')
-    with open(ndvi_meta_file, 'w') as f:
-        json.dump(ndvi_metadata, f, indent=2)
 
     print(f"Created {image_counter} thermal windows")
-    print(f"Patches with NDVI: {len(ndvi_metadata)}")
     print(f"Saved position metadata to {positions_file}")
-    print(f"Saved NDVI metadata to {ndvi_meta_file}")
 
-    return positions_dict, ndvi_metadata
+    return positions_dict
 
 
 def save_thermal_window(x_ind, y_ind, window_size, image_id, thermal_array, quality_mask, mask_file, n_bands, directory,
-                        date_idx, positions_dict, ndvi_array, ndvi_metadata):
+                                      date_idx, positions_dict):
     """
     Windowed thermal image and corresponding mask with position tracking.
     """
@@ -598,32 +487,6 @@ def save_thermal_window(x_ind, y_ind, window_size, image_id, thermal_array, qual
         with rasterio.open(mask_path, 'w', **mask_profile) as mask_out:
             mask_out.write(mask_window_data)
 
-        if ndvi_array is not None:
-            ndvi_window = ndvi_array[x_ind:x_ind + window_size, y_ind:y_ind + window_size]
-
-            # Apply same quality mask to NDVI
-            ndvi_window = ndvi_window * quality_window
-
-            ndvi_profile = {
-                'driver': 'GTiff',
-                'dtype': ndvi_window.dtype,
-                'count': 1,
-                'height': window_size,
-                'width': window_size
-            }
-            ndvi_path = f"{directory}/ndvi/{image_id}.tif"
-            with rasterio.open(ndvi_path, 'w', **ndvi_profile) as ndvi_out:
-                ndvi_out.write(ndvi_window, 1)
-
-            # Record that this patch has NDVI
-            ndvi_metadata[str(image_id)] = {
-                'has_ndvi': True,
-                'ndvi_path': ndvi_path,
-                'valid_ndvi_ratio': float(np.sum(ndvi_window != 0) / (window_size * window_size))
-            }
-        else:
-            ndvi_metadata[str(image_id)] = {'has_ndvi': False}
-
         # Position metadata
         positions_dict[str(image_id)] = {
             'x': int(x_ind),
@@ -654,40 +517,6 @@ def load_thermal_data(thermal_path, mask_path):
     mask_files.sort()
 
     return thermal_files, mask_files
-
-
-def load_ndvi_data_for_split(patch_ids, ndvi_dir, ndvi_metadata):
-    """
-    Load NDVI data for a specific data split (train/valid/test).
-
-    Args:
-        patch_ids: list of patch IDs (e.g., ['0', '1', '2', ...])
-        ndvi_dir: directory containing NDVI patches
-        ndvi_metadata: metadata dict from ndvi_metadata.json
-
-    Returns:
-        ndvi_array: (n_patches, 64, 64) array with NDVI values
-        has_ndvi_mask: (n_patches,) boolean array indicating which patches have NDVI
-    """
-    n_patches = len(patch_ids)
-    ndvi_array = np.zeros((n_patches, 128, 128), dtype=np.float32)
-    has_ndvi_mask = np.zeros(n_patches, dtype=bool)
-
-    for idx, patch_id in enumerate(patch_ids):
-        patch_id_str = str(patch_id)
-        if patch_id_str in ndvi_metadata and ndvi_metadata[patch_id_str]['has_ndvi']:
-            try:
-                ndvi_path = os.path.join(ndvi_dir, f"{patch_id}.tif")
-                ndvi_patch = tifffile.imread(ndvi_path)
-                if len(ndvi_patch.shape) == 3:
-                    ndvi_patch = ndvi_patch[0]  # Take first band
-                ndvi_array[idx] = ndvi_patch
-                has_ndvi_mask[idx] = True
-            except Exception as e:
-                print(f"Warning: Could not load NDVI for patch {patch_id}: {e}")
-
-    print(f"Loaded NDVI for {np.sum(has_ndvi_mask)}/{n_patches} patches")
-    return ndvi_array, has_ndvi_mask
 
 
 def preprocess_thermal_data(thermal_files, mask_files, target_shape_thermal,
@@ -803,7 +632,7 @@ def create_convlstm_positions(pos_train, pos_valid, pos_test, sequence_length=5,
 
         seq_positions = []
         for i in range(0, n_samples - sequence_length + 1, stride):
-            # Use the last frame's position for the sequence
+            # Last frame's position for the sequence
             last_frame_pos = positions[i + sequence_length - 1]
             seq_positions.append(last_frame_pos)
 
@@ -847,9 +676,8 @@ def create_time_sequences_from_patches(X_train, X_valid, X_test, y_train, y_vali
 
         for i in range(0, n_samples - sequence_length + 1, stride):
             X_seq = X_split[i:i + sequence_length]  # (seq_len, h, w, c)
-            y_seq = y_split[i + sequence_length - 1]  # Use last frame's mask (h, w, 1)
+            y_seq = y_split[i + sequence_length - 1]  # last frame's mask (h, w, 1)
 
-            # QC: count non-zero frames in sequence
             valid_frames = 0
             for frame_idx in range(sequence_length):
                 frame_sum = np.sum(X_seq[frame_idx])
@@ -888,70 +716,8 @@ def create_time_sequences_from_patches(X_train, X_valid, X_test, y_train, y_vali
     return X_train_seq, X_valid_seq, X_test_seq, y_train_seq, y_valid_seq, y_test_seq
 
 
-def create_ndvi_sequences_from_patches(ndvi_patches, has_ndvi_mask, sequence_length=5,
-                                       overlap=2, min_valid_frames=3):
-    """
-    Create NDVI sequences that correspond to ConvLSTM thermal sequences.
-    """
-    n_patches, height, width = ndvi_patches.shape
-    stride = sequence_length - overlap
-    n_sequences = max(0, (n_patches - sequence_length) // stride + 1)
-
-    if n_sequences == 0:
-        return (np.array([]).reshape(0, sequence_length, height, width),
-                np.array([]).reshape(0),
-                np.array([]).reshape(0))
-
-    ndvi_sequences = np.zeros((n_sequences, sequence_length, height, width), dtype=np.float32)
-    has_ndvi_seq_mask = np.zeros(n_sequences, dtype=bool)
-    ndvi_frame_counts = np.zeros(n_sequences, dtype=int)
-
-    seq_idx = 0
-    for i in range(0, n_patches - sequence_length + 1, stride):
-        # Extract sequence
-        ndvi_seq = ndvi_patches[i:i + sequence_length]  # (seq_len, h, w)
-        has_ndvi_seq = has_ndvi_mask[i:i + sequence_length]  # (seq_len,)
-
-        # Count how many frames have valid NDVI
-        valid_frame_count = np.sum(has_ndvi_seq)
-
-        ndvi_sequences[seq_idx] = ndvi_seq
-        ndvi_frame_counts[seq_idx] = valid_frame_count
-
-        # Mark sequence as having NDVI if it meets minimum threshold
-        if valid_frame_count >= min_valid_frames:
-            has_ndvi_seq_mask[seq_idx] = True
-
-        seq_idx += 1
-
-    print(f"\nNDVI Sequence Statistics:")
-    print(f"  Total sequences: {n_sequences}")
-    print(f"  Sequences with ≥{min_valid_frames} NDVI frames: {np.sum(has_ndvi_seq_mask)}")
-    print(f"  Average NDVI frames per sequence: {np.mean(ndvi_frame_counts):.1f}")
-
-    return ndvi_sequences, has_ndvi_seq_mask, ndvi_frame_counts
-
-
-def aggregate_sequence_ndvi(ndvi_sequence, has_ndvi_frames):
-    """
-    Aggregate NDVI from a sequence into a single value.
-    """
-    valid_indices = np.where(has_ndvi_frames)[0]
-
-    if len(valid_indices) == 0:
-        return np.zeros((128, 128), dtype=np.float32)
-
-    # Mean of all valid frames
-    valid_frames = ndvi_sequence[valid_indices]
-    aggregated = np.mean(valid_frames, axis=0)
-
-    return aggregated
-
-
-def process_ecostress_thermal_data(data_dir, mask_file, ndvi_dir=None, optical_dir=None, sar_dir=None,
-                                   target_shape_thermal=(64, 64, 2), target_shape_mask=(128, 128, 1),
-                                   max_cloud_percentage=12, max_bad_percentage=15, sequence_length=5, overlap=2,
-                                   max_ndvi_days_diff=7):
+def process_ecostress_thermal_data(data_dir, mask_file, optical_dir=None, sar_dir=None, target_shape_thermal=(64, 64, 2), target_shape_mask=(64, 64, 1),
+                                   max_cloud_percentage=12, max_bad_percentage=15, sequence_length=5, overlap=2):
     """
     Complete pipeline for processing ECOSTRESS thermal data for diurnal, seasonal and multi-modal patches.
     """
@@ -973,15 +739,7 @@ def process_ecostress_thermal_data(data_dir, mask_file, ndvi_dir=None, optical_d
     quality_masks = [date_masks[date] for date in filtered_dates]
     print(f"Loaded {len(thermal_data_combined)} thermal images")
 
-    matched_ndvi = {}
-    if ndvi_dir and os.path.exists(ndvi_dir):
-        print("\nStep 3.5: Processing remaining data...")
-        ndvi_grouped = group_ndvi_files_by_date(ndvi_dir)
-        matched_ndvi = match_ndvi_to_thermal_dates(
-            filtered_dates, ndvi_grouped, max_days_diff=max_ndvi_days_diff
-        )
-    else:
-        print("\nStep 3.5: No NDVI directory provided, skipping NDVI processing")
+    print("\nStep 3.5: Loading optical and SAR data...")
     optical_grouped = None
     sar_grouped = None
 
@@ -1007,12 +765,10 @@ def process_ecostress_thermal_data(data_dir, mask_file, ndvi_dir=None, optical_d
             continue
 
         print(f"\n=== Processing {combo_name} ===")
-        directory = "./data_thermal_thermal_only"
+
         # Create windowed dataset
-        positions_dict, ndvi_metadata = create_thermal_dataset(
-            thermal_data_combined, quality_masks, mask_file,
-            filtered_dates, matched_ndvi,
-            window_size=128, stride=64, directory=f"./data_thermal_{combo_name}")
+        create_thermal_dataset(combined_data_list, combined_masks, mask_file,
+                               directory=f"./data_thermal_{combo_name}")
 
         # Load windowed data
         thermal_list, mask_list = load_thermal_data(
@@ -1022,7 +778,7 @@ def process_ecostress_thermal_data(data_dir, mask_file, ndvi_dir=None, optical_d
 
         # Determine channel count
         channels = combined_data_list[0].shape[0]
-        target_shape = (128, 128, channels)
+        target_shape = (64, 64, channels)
 
         # Preprocess
         X, y, positions = preprocess_thermal_data(
@@ -1036,55 +792,6 @@ def process_ecostress_thermal_data(data_dir, mask_file, ndvi_dir=None, optical_d
         X_train, X_valid, X_test, y_train, y_valid, y_test, pos_train, pos_valid, pos_test = \
             split_thermal_data(X, y, positions)
 
-        # Extract patch IDs for each split
-        n_train = len(X_train)
-        n_valid = len(X_valid)
-        train_ids = list(range(n_train))
-        valid_ids = list(range(n_train, n_train + n_valid))
-        test_ids = list(range(n_train + n_valid, len(X)))
-
-        # Load NDVI for each split
-        print("\nLoading NDVI data for splits...")
-        ndvi_train, has_ndvi_train = load_ndvi_data_for_split(
-            train_ids, f"{directory}/ndvi", ndvi_metadata
-        )
-        ndvi_valid, has_ndvi_valid = load_ndvi_data_for_split(
-            valid_ids, f"{directory}/ndvi", ndvi_metadata
-        )
-        ndvi_test, has_ndvi_test = load_ndvi_data_for_split(
-            test_ids, f"{directory}/ndvi", ndvi_metadata
-        )
-
-        print("\nCreating NDVI sequences for ConvLSTM...")
-        ndvi_train_seq, has_ndvi_train_seq, ndvi_train_counts = create_ndvi_sequences_from_patches(
-            ndvi_train, has_ndvi_train, sequence_length, overlap
-        )
-        ndvi_valid_seq, has_ndvi_valid_seq, ndvi_valid_counts = create_ndvi_sequences_from_patches(
-            ndvi_valid, has_ndvi_valid, sequence_length, overlap
-        )
-        ndvi_test_seq, has_ndvi_test_seq, ndvi_test_counts = create_ndvi_sequences_from_patches(
-            ndvi_test, has_ndvi_test, sequence_length, overlap
-        )
-
-        # ADD THIS: Aggregate NDVI sequences
-        print("\nAggregating NDVI sequences...")
-        stride = sequence_length - overlap
-        ndvi_train_agg = np.array([
-            aggregate_sequence_ndvi(ndvi_train_seq[i],
-                                    has_ndvi_train[i * stride:i * stride + sequence_length])
-            for i in range(len(ndvi_train_seq))
-        ])
-        ndvi_valid_agg = np.array([
-            aggregate_sequence_ndvi(ndvi_valid_seq[i],
-                                    has_ndvi_valid[i * stride:i * stride + sequence_length])
-            for i in range(len(ndvi_valid_seq))
-        ])
-        ndvi_test_agg = np.array([
-            aggregate_sequence_ndvi(ndvi_test_seq[i],
-                                    has_ndvi_test[i * stride:i * stride + sequence_length])
-            for i in range(len(ndvi_test_seq))
-        ])
-
         # ConvLSTM sequences
         X_train_seq, X_valid_seq, X_test_seq, y_train_seq, y_valid_seq, y_test_seq = \
             create_time_sequences_from_patches(X_train, X_valid, X_test, y_train, y_valid, y_test, sequence_length, overlap)
@@ -1092,7 +799,7 @@ def process_ecostress_thermal_data(data_dir, mask_file, ndvi_dir=None, optical_d
         pos_train_seq, pos_valid_seq, pos_test_seq = create_convlstm_positions(pos_train, pos_valid, pos_test, sequence_length, overlap)
 
         print("\nStep 6: Saving processed dataset...")
-        save_dir = f"C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Outputs/Villoslada/{combo_name}"
+        save_dir = f"C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Outputs/Puertollano/{combo_name}"
         os.makedirs(save_dir, exist_ok=True)
         # CNN
         np.save(os.path.join(save_dir, 'X_train.npy'), X_train)
@@ -1106,15 +813,7 @@ def process_ecostress_thermal_data(data_dir, mask_file, ndvi_dir=None, optical_d
         np.save(os.path.join(save_dir, 'pos_test.npy'), pos_test)
         print(f"Dataset saved for CNN in {save_dir}")
 
-        # NDVI data (separate files)
-        np.save(os.path.join(save_dir, 'ndvi_train.npy'), ndvi_train)
-        np.save(os.path.join(save_dir, 'ndvi_valid.npy'), ndvi_valid)
-        np.save(os.path.join(save_dir, 'ndvi_test.npy'), ndvi_test)
-        np.save(os.path.join(save_dir, 'has_ndvi_train.npy'), has_ndvi_train)
-        np.save(os.path.join(save_dir, 'has_ndvi_valid.npy'), has_ndvi_valid)
-        np.save(os.path.join(save_dir, 'has_ndvi_test.npy'), has_ndvi_test)
-
-        # ConvLSTM
+        # ConvLSTM data
         np.save(os.path.join(save_dir, 'X_train_seq.npy'), X_train_seq)
         np.save(os.path.join(save_dir, 'X_valid_seq.npy'), X_valid_seq)
         np.save(os.path.join(save_dir, 'X_test_seq.npy'), X_test_seq)
@@ -1126,42 +825,17 @@ def process_ecostress_thermal_data(data_dir, mask_file, ndvi_dir=None, optical_d
         np.save(os.path.join(save_dir, 'pos_test_seq.npy'), pos_test_seq)
         print(f"Dataset saved for ConvLSTM in {save_dir}")
 
-        # NDVI sequences
-        np.save(os.path.join(save_dir, 'ndvi_train_seq.npy'), ndvi_train_seq)
-        np.save(os.path.join(save_dir, 'ndvi_valid_seq.npy'), ndvi_valid_seq)
-        np.save(os.path.join(save_dir, 'ndvi_test_seq.npy'), ndvi_test_seq)
-        np.save(os.path.join(save_dir, 'has_ndvi_train_seq.npy'), has_ndvi_train_seq)
-        np.save(os.path.join(save_dir, 'has_ndvi_valid_seq.npy'), has_ndvi_valid_seq)
-        np.save(os.path.join(save_dir, 'has_ndvi_test_seq.npy'), has_ndvi_test_seq)
-        np.save(os.path.join(save_dir, 'ndvi_train_counts.npy'), ndvi_train_counts)
-        np.save(os.path.join(save_dir, 'ndvi_valid_counts.npy'), ndvi_valid_counts)
-        np.save(os.path.join(save_dir, 'ndvi_test_counts.npy'), ndvi_test_counts)
-
-        # Aggregated NDVI
-        np.save(os.path.join(save_dir, 'ndvi_train_agg.npy'), ndvi_train_agg)
-        np.save(os.path.join(save_dir, 'ndvi_valid_agg.npy'), ndvi_valid_agg)
-        np.save(os.path.join(save_dir, 'ndvi_test_agg.npy'), ndvi_test_agg)
-
-        print(f"  - NDVI coverage: {np.sum(has_ndvi_test)}/{len(has_ndvi_test)} test patches")
-        print(f"  - ConvLSTM sequences: {len(X_train_seq)} train, {len(X_valid_seq)} valid, {len(X_test_seq)} test")
-        print(f"  - NDVI sequence coverage: {np.sum(has_ndvi_test_seq)}/{len(has_ndvi_test_seq)} test sequences")
-
         all_results[combo_name] = {
             'cnn': (X_train, X_valid, X_test, y_train, y_valid, y_test, pos_train, pos_valid, pos_test),
-            'ndvi': (ndvi_train, ndvi_valid, ndvi_test, has_ndvi_train, has_ndvi_valid, has_ndvi_test),
             'convlstm': (X_train_seq, X_valid_seq, X_test_seq, y_train_seq, y_valid_seq, y_test_seq,
-                         pos_train_seq, pos_valid_seq, pos_test_seq),
-            'ndvi_seq': (ndvi_train_seq, ndvi_valid_seq, ndvi_test_seq, has_ndvi_train_seq, has_ndvi_valid_seq,
-                         has_ndvi_test_seq, ndvi_train_counts, ndvi_valid_counts, ndvi_test_counts),
-            'ndvi_agg': (ndvi_train_agg, ndvi_valid_agg, ndvi_test_agg)}
+                         pos_train_seq, pos_valid_seq, pos_test_seq)}
 
     return all_results
 
 
 results = process_ecostress_thermal_data(
-    data_dir="C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/THERMAL/Villoslada_full/",
-    mask_file="C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Masks/Villoslada masks/Geo_map_resized_Vill.tif",
-    ndvi_dir="C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/NDVI/S2 NDVI Villoslada/",
-    optical_dir=None, #"C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/RGB/Villoslada RGB/",
-    sar_dir=None, #"C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/SAR/SAR Villoslada/",
-    sequence_length=5, overlap=2, max_ndvi_days_diff=15)
+        data_dir="C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/THERMAL/Puertollano_full/",
+        mask_file="C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/Masks/Puertollano masks/Geo_map_resized_Puerto.tif",
+        optical_dir="C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/RGB/Puertollano RGB/",
+        sar_dir="C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/SAR/SAR Puertollano/",
+        sequence_length=5, overlap=2)

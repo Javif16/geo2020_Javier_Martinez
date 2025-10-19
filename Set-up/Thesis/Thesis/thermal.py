@@ -326,7 +326,6 @@ class ThermalSignatureAnalyzer:
         return results, dates
 
 
-# Example usage
 if __name__ == "__main__":
     geo_map_path = r"C:\Users\txiki\OneDrive\Documents\Studies\MSc_Geomatics\2Y\Thesis\Masks\Santa Olalla masks\Geo_map_resized_Santa.tif"
     thermal_images_dir = r"C:\Users\txiki\OneDrive\Documents\Studies\MSc_Geomatics\2Y\Thesis\THERMAL\Santa_full"

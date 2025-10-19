@@ -45,7 +45,7 @@ from collections import defaultdict
 from utils import get_map_size_from_path, reconstruct_map_from_patches
 
 # -------------- LOADING -----------------------------------------------------------------------------------------------
-data_path = 'E:/Studies/Thesis/Outputs/Villoslada overlap/thermal_only/'
+data_path = 'E:/Studies/Thesis/Outputs/Santa Olalla overlap/thermal_only/'
 X_train = np.load(data_path + 'X_train.npy')
 X_valid = np.load(data_path + 'X_valid.npy')
 X_test = np.load(data_path + 'X_test.npy')
@@ -196,33 +196,20 @@ def unet_model(size_input=(128, 128, 2), filters_base=16, classes=14, l2_reg=0.0
 def simple_weighted_loss(class_weights, gamma=2.0, alpha=0.25):
     """
     Combines focal loss (for hard examples) with class weights (for imbalance)
-
-    gamma: How much to focus on hard examples (2.0 = standard)
-    alpha: Base weight for focal term
-    class_weights: Your existing class imbalance weights
     """
 
     def loss_fn(y_true, y_pred):
         y_true = tf.squeeze(y_true, axis=-1)  # [batch, H, W]
         y_true = tf.cast(y_true, tf.int32)
-
-        # Clip predictions for numerical stability
         y_pred = tf.clip_by_value(y_pred, 1e-7, 1.0 - 1e-7)
-
         # One-hot encode
         y_true_one_hot = tf.one_hot(y_true, depth=14)
 
-        # Standard cross-entropy
+        # Cross-entropy
         cross_entropy = -y_true_one_hot * tf.math.log(y_pred)
-
-        # Focal term: (1 - p_t)^gamma
-        # This makes easy examples contribute less to loss
         focal_weight = tf.pow(1 - y_pred, gamma)
-
-        # Apply focal weighting
         focal_loss = alpha * focal_weight * cross_entropy
 
-        # Apply class weights
         class_weight_tensor = tf.constant([
             class_weights.get(0, 1.0), class_weights.get(1, 1.0),
             class_weights.get(2, 1.0), class_weights.get(3, 1.0),
@@ -233,15 +220,9 @@ def simple_weighted_loss(class_weights, gamma=2.0, alpha=0.25):
             class_weights.get(12, 1.0), class_weights.get(13, 1.0)
         ], dtype=tf.float32)
 
-        # Gather weights for each pixel's true class
         sample_weights = tf.gather(class_weight_tensor, y_true)
-
-        # Expand dims to match focal_loss shape
         sample_weights = tf.expand_dims(sample_weights, axis=-1)
-
-        # Combine both: focal loss AND class weights
         weighted_focal_loss = focal_loss * sample_weights
-
         return tf.reduce_mean(tf.reduce_sum(weighted_focal_loss, axis=-1))
 
     return loss_fn
@@ -433,24 +414,23 @@ def train_model(X_train, y_train, X_val, y_val, X_test, y_test, use_optuna=True,
         filters_base=best_params['filters_base'],
         classes=14,
         l2_reg=best_params['l2_reg'])
-
     print("Model output shape:", model.output_shape)
 
     class_weights = {
         0: 1.0,  # NaNs (background)
-        1: 3.5,  # Sand
-        2: 2.5,  # Clay
+        1: 5.0,  # Sand
+        2: 1.0,  # Clay
         3: 1.0,  # Chalk
-        4: 6.0,  # Silt
-        5: 5.0,  # Peat
+        4: 4.0,  # Silt
+        5: 1.0,  # Peat
         6: 1.0,  # Loam
-        7: 1.0,  # Detritic
-        8: 2.0,  # Carbonate
-        9: 1.0,  # Volcanic
+        7: 3.0,  # Detritic
+        8: 3.0,  # Carbonate
+        9: 3.0,  # Volcanic
         10: 1.0,  # Plutonic
         11: 1.0,  # Foliated
-        12: 1.0,  # Non-Foliated
-        13: 1.0  # Water
+        12: 3.0,  # Non-Foliated
+        13: 3.0  # Water -
     }
     # Puertollano - 1, 2, 4, 6, 7, 8, 9, 11, 12
     # Santa Olalla - 1, 3, 4, 7, 8, 9, 10, 11, 12
@@ -483,7 +463,7 @@ def train_model(X_train, y_train, X_val, y_val, X_test, y_test, use_optuna=True,
         patience=15,
         restore_best_weights=True)
 
-    # TRAINING with augmentation
+    # TRAINING
     print("Training final CNN model...")
     history = model.fit(
         X_train, y_train,
@@ -687,7 +667,6 @@ def plot_training(history):
     plt.show()
 
 
-
 def visualize_cnn_results(X_test, y_test, predictions, data_path, positions_test=None, num_patches=3, patch_indices=None,
                           patch_size=128, figsize=(20, 10), cmap_thermal='hot', cmap_segmentation='tab20'):
     """
@@ -771,14 +750,14 @@ def visualize_cnn_results(X_test, y_test, predictions, data_path, positions_test
 
         print(f"\nDate {int(date_idx)}: {len(date_y)} patches")
 
-        # Reconstruct maps using positions
+        # Reconstruct maps
         gt_map = reconstruct_map_from_patches(
             date_y, date_pos, map_size,
-            patch_size=patch_size,      # ← Pass patch_size
+            patch_size=patch_size,
             handle_overlap=True)
         pred_map = reconstruct_map_from_patches(
             date_pred, date_pos, map_size,
-            patch_size=patch_size,      # ← Pass patch_size
+            patch_size=patch_size,
             handle_overlap=True)
         fig, axes = plt.subplots(1, 2, figsize=(20, 10), constrained_layout=True)
 
@@ -827,7 +806,6 @@ def visualize_ndvi_correlation(y_test, predictions, confidences, ndvi_test, has_
         date_mask = positions_test[:, 2] == date_idx
         valid_mask = date_mask & has_ndvi_test
     else:
-        # Use all patches
         valid_mask = has_ndvi_test
 
     if np.sum(valid_mask) == 0:
@@ -836,7 +814,6 @@ def visualize_ndvi_correlation(y_test, predictions, confidences, ndvi_test, has_
 
     print(f"\nAnalyzing {np.sum(valid_mask)} patches with NDVI data...")
 
-    # Get data for valid patches
     valid_y = y_test[valid_mask]
     valid_pred = predictions[valid_mask]
     valid_conf = confidences[valid_mask]
@@ -860,14 +837,13 @@ def visualize_ndvi_correlation(y_test, predictions, confidences, ndvi_test, has_
 
     # Calculate accuracy map (1 where correct, 0 where incorrect)
     accuracy_map = (gt_map.squeeze() == pred_map).astype(float)
-    # Set background to NaN for visualization
     accuracy_map[gt_map.squeeze() == 0] = np.nan
     ndvi_map_display = ndvi_map.copy()
     ndvi_map_display[ndvi_map == 0] = np.nan
     conf_map_display = conf_map.copy()
     conf_map_display[gt_map.squeeze() == 0] = np.nan
 
-    # ========== VISUALIZATION 1: Confidence + NDVI Maps ==========
+    # Confidence + NDVI Maps
     fig, axes = plt.subplots(1, 2, figsize=(20, 10), constrained_layout=True)
 
     # Confidence map
@@ -888,7 +864,7 @@ def visualize_ndvi_correlation(y_test, predictions, confidences, ndvi_test, has_
     fig.suptitle(f'{date_str}: Model Confidence vs NDVI', fontsize=16, y=0.98)
     plt.show()
 
-    # ========== VISUALIZATION 2: Accuracy Map ==========
+    # Accuracy Map
     fig, ax = plt.subplots(1, 1, figsize=(10, 10), constrained_layout=True)
     im = ax.imshow(accuracy_map, cmap='RdYlGn', vmin=0, vmax=1, aspect='equal')
     ax.set_title(f'{date_str}: Pixel-wise Accuracy', fontsize=14)
@@ -897,8 +873,7 @@ def visualize_ndvi_correlation(y_test, predictions, confidences, ndvi_test, has_
     cbar.set_label('Correct (1) / Incorrect (0)', rotation=270, labelpad=15)
     plt.show()
 
-    # ========== CORRELATION ANALYSIS ==========
-    # Flatten and get valid pixels (non-zero, non-NaN)
+    # Correlation
     conf_flat = conf_map.flatten()
     ndvi_flat = ndvi_map.flatten()
     acc_flat = accuracy_map.flatten()
@@ -908,42 +883,37 @@ def visualize_ndvi_correlation(y_test, predictions, confidences, ndvi_test, has_
     conf_values = conf_flat[valid_pixels]
     ndvi_values = ndvi_flat[valid_pixels]
     acc_values = acc_flat[valid_pixels]
-
     print(f"Valid pixels for correlation: {len(conf_values)}")
-
     if len(conf_values) < 10:
         print("Not enough valid pixels for correlation analysis!")
         return
 
-    # Compute correlations
-    from scipy.stats import pearsonr, spearmanr
+    from scipy.stats import pearsonr
 
     corr_conf_ndvi, p_conf = pearsonr(conf_values, ndvi_values)
     corr_acc_ndvi, p_acc = pearsonr(acc_values, ndvi_values)
-
     print(f"\nCorrelation Results:")
     print(f"  Confidence vs NDVI: r={corr_conf_ndvi:.3f}, p={p_conf:.4f}")
     print(f"  Accuracy vs NDVI: r={corr_acc_ndvi:.3f}, p={p_acc:.4f}")
 
-    # ========== VISUALIZATION 3: Correlation Plots ==========
+    # Correlation Plots
     fig, axes = plt.subplots(1, 2, figsize=(16, 6), constrained_layout=True)
 
-    # Plot 1: Confidence vs NDVI
+    # Confidence vs NDVI
     axes[0].hexbin(ndvi_values, conf_values, gridsize=50, cmap='Blues', mincnt=1)
     axes[0].set_xlabel('NDVI', fontsize=12)
     axes[0].set_ylabel('Model Confidence (Max Probability)', fontsize=12)
     axes[0].set_title(f'Confidence vs NDVI\nr={corr_conf_ndvi:.3f}, p={p_conf:.4f}', fontsize=14)
     axes[0].grid(True, alpha=0.3)
 
-    # Add trend line
+    # Trend line
     z = np.polyfit(ndvi_values, conf_values, 1)
     p = np.poly1d(z)
     ndvi_sorted = np.sort(ndvi_values)
     axes[0].plot(ndvi_sorted, p(ndvi_sorted), "r--", linewidth=2, label=f'Trend: y={z[0]:.3f}x+{z[1]:.3f}')
     axes[0].legend()
 
-    # Plot 2: Accuracy vs NDVI
-    # Create bins for NDVI and compute mean accuracy per bin
+    # Accuracy vs NDVI
     ndvi_bins = np.linspace(ndvi_values.min(), ndvi_values.max(), 20)
     bin_indices = np.digitize(ndvi_values, ndvi_bins)
 
@@ -967,16 +937,13 @@ def visualize_ndvi_correlation(y_test, predictions, confidences, ndvi_test, has_
     fig.suptitle(f'{date_str}: NDVI Correlation Analysis', fontsize=16, y=1.02)
     plt.show()
 
-    # ========== STATISTICS BY NDVI RANGES ==========
     print("\n=== Performance by NDVI Range ===")
     ndvi_ranges = [
         (-1.0, 0.0, "Bare Soil/Water"),
         (0.0, 0.2, "Low Vegetation"),
         (0.2, 0.4, "Moderate Vegetation"),
         (0.4, 0.6, "Healthy Vegetation"),
-        (0.6, 1.0, "Very Healthy Vegetation")
-    ]
-
+        (0.6, 1.0, "Very Healthy Vegetation")]
     for ndvi_min, ndvi_max, label in ndvi_ranges:
         mask = (ndvi_values >= ndvi_min) & (ndvi_values < ndvi_max)
         if np.sum(mask) > 0:
@@ -1030,7 +997,7 @@ for param_name, param_value in best_params.items():
 
 plot_training(history)
 
-visualize_cnn_results(X_test, y_test, predictions, data_path=data_path, positions_test=pos_test, figsize=(18, 10), patch_indices=[0, 1, 2])
+visualize_cnn_results(X_test, y_test, predictions, data_path=data_path, positions_test=pos_test, figsize=(18, 10), patch_indices=[4, 3, 5])
 
 print("\n=== NDVI CORRELATION ANALYSIS ===")
 unique_dates = np.unique(pos_test[:, 2])
@@ -1049,27 +1016,21 @@ visualize_ndvi_correlation(
 Maximum patch index:
     Villoslada:
         · thermal only - 900
-        · thermal_optical - 76
         · thermal_sar - 263
-        · all - 36
         · thermal_day - 864
         · thermal_night - 249
         · thermal_winter - 501
         · thermal_summer - 612
     Santa:
         · thermal only - 60
-        · thermal_optical - 23
         · thermal_sar - 60
-        · all - 5
         · thermal_day - 175
         · thermal_night - 81
         · thermal_winter - 111
         · thermal_summer - 145
     Puertollano:
         · thermal only - 360
-        · thermal_optical - 40
         · thermal_sar - 173
-        · all - 18
         · thermal_day - 202
         · thermal_night - 159
         · thermal_winter - 173

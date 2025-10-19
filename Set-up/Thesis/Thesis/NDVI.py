@@ -25,20 +25,19 @@ print("All READY and RUNNING tasks have been cancelled.")
 aoi = ee.Geometry.Rectangle([-2.852681, 42.002377, -2.518803, 42.168736])
 start, end = '2019-01-01', '2024-12-31'
 
-# Sentinel-2 collection for NDVI calculation
-col = (ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")  # Using Surface Reflectance data
+# Sentinel-2 collection
+col = (ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")  # Surface Reflectance data
        .filterDate(start, end)
        .filterBounds(aoi)
-       .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 10))  # Filter out very cloudy images
-       .select(['B4', 'B8', 'QA60']))  # Red, NIR, and Quality Assessment bands
+       .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 10))
+       .select(['B4', 'B8', 'QA60']))
 
 
-# Function to calculate NDVI and mask clouds
 def calculate_ndvi(image):
     # Calculate NDVI
     ndvi = image.normalizedDifference(['B8', 'B4']).rename('NDVI')
 
-    # Cloud masking using QA60 band
+    # QA60 band cloud masking
     qa = image.select('QA60')
     cloudBitMask = 1 << 10  # Bit 10: Cirrus clouds
     cirrusBitMask = 1 << 11  # Bit 11: Clouds
@@ -47,9 +46,7 @@ def calculate_ndvi(image):
     return ndvi.updateMask(mask).copyProperties(image, ['system:time_start'])
 
 
-# Apply NDVI calculation to collection
 ndvi_col = col.map(calculate_ndvi)
-
 images = ndvi_col.toList(ndvi_col.size())
 n = images.size().getInfo()
 print(f"Found {n} NDVI images to export")
@@ -71,14 +68,12 @@ for idx in range(n):
     )
     task.start()
     print(f"Submitted export {idx + 1}/{n}: {desc}")
-'''
 
-# Input and output folders for post-processing
+'''
 input_folder = r"C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/NDVI/S2 NDVI Santa Olalla raw"
 output_folder = r"C:/Users/txiki/OneDrive/Documents/Studies/MSc_Geomatics/2Y/Thesis/NDVI/S2 NDVI Santa Olalla"
 os.makedirs(output_folder, exist_ok=True)
 
-# Process .tif files following similar methodology as SAR processing
 for fname in os.listdir(input_folder):
     if not fname.lower().endswith(".tif"):
         continue
@@ -107,6 +102,5 @@ for fname in os.listdir(input_folder):
             dst.write(processed, 1)
 
     print(f"Saved: {fname}")
-
 print("NDVI extraction and processing completed!")
 '''
